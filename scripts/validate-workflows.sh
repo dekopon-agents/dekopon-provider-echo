@@ -5,14 +5,17 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 ci="$root/.github/workflows/ci.yml"
 release="$root/.github/workflows/release.yml"
+recovery="$root/.github/workflows/recover-v0.1.0.yml"
+recovery_helper="$root/scripts/recover-v0.1.0-artifacts.sh"
 verifier="$root/scripts/verify-oci-manifest.py"
 attestation_verifier="$root/scripts/verify-attestation-anonymously.sh"
-[[ -f "$ci" && -f "$release" && -f "$verifier" && -f "$attestation_verifier" ]] || {
-  echo "error: CI, release workflow, attestation verifier, and OCI verifier are required" >&2
+[[ -f "$ci" && -f "$release" && -f "$recovery" && -f "$recovery_helper" && \
+   -f "$verifier" && -f "$attestation_verifier" ]] || {
+  echo "error: CI, release/recovery workflows, recovery helper, and verifiers are required" >&2
   exit 1
 }
 
-python3 - "$ci" "$release" <<'PY'
+python3 - "$ci" "$release" "$recovery" <<'PY'
 import pathlib
 import re
 import sys
@@ -63,23 +66,59 @@ if grep -Eq 'ghcr[.]io/dekopon-agents/provider-echo:(latest|staging|tmp|temp)' "
   echo "error: release names a mutable or secondary package tag" >&2
   exit 1
 fi
-if grep -Eq 'CARGO_TARGET_DIR|SCCACHE_DIR|cargo clean|pull_request_target' "$ci" "$release"; then
+if grep -Eq 'CARGO_TARGET_DIR|SCCACHE_DIR|cargo clean|pull_request_target' \
+  "$ci" "$release" "$recovery"; then
   echo "error: workflow violates target/cache/event policy" >&2
   exit 1
 fi
-if sed -n '/^  draft:/,/^  ghcr:/p' "$release" | grep -Fq 'id-token: write'; then
+draft_job=$(sed -n '/^  draft:/,/^  ghcr:/p' "$release")
+if grep -Fq 'id-token: write' <<<"$draft_job"; then
   echo "error: draft job has unnecessary OIDC authority" >&2
   exit 1
 fi
-if ! sed -n '/^  finalize:/,/^  verify_final:/p' "$release" | grep -Fq 'packages: read'; then
+finalize_job=$(sed -n '/^  finalize:/,/^  verify_final:/p' "$release")
+if ! grep -Fq 'packages: read' <<<"$finalize_job"; then
   echo "error: finalize job cannot revalidate package cardinality" >&2
   exit 1
 fi
 
-python3 - "$release" <<'PY'
+for required in \
+  'workflow_dispatch:' \
+  'recover-v0.1.0-from-tag-ci-32816234695' \
+  'SOURCE_CI_RUN_ID: "32816234695"' \
+  'SOURCE_SHA: 64293b0d2b37a864b7129286064a23fee24b163c' \
+  'SOURCE_TAG_OBJECT: 2914235ba1629663b4b88aa20a75f47f851e001c' \
+  'EXPECTED_SHA: c15e88cf50726e8a80d1f73f8167563242d59ea80c1af026014e30054ac786b1' \
+  './scripts/recover-v0.1.0-artifacts.sh "$RUNNER_TEMP/tagged"' \
+  '$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml' \
+  'org.opencontainers.image.revision=$SOURCE_SHA' \
+  'Attest both exact recovered release files' \
+  'Attest exact tag-source CycloneDX SBOM predicate for the component'; do
+  grep -Fq "$required" "$recovery" || {
+    echo "error: recovery workflow omits pinned interlock: $required" >&2
+    exit 1
+  }
+done
+for required in \
+  'component_artifact_id=9551915476' \
+  'component_archive_sha=30678952f3abc4a778e301f978c8130100004caff5ff38d0bc46495c12d72e61' \
+  'component_sha=c15e88cf50726e8a80d1f73f8167563242d59ea80c1af026014e30054ac786b1' \
+  'failed_release_run_id=32816234729'; do
+  grep -Fq "$required" "$recovery_helper" || {
+    echo "error: recovery helper omits pinned source fact: $required" >&2
+    exit 1
+  }
+done
+if grep -Eq 'cargo (build|test|check)|build-component[.]sh|reproducible-build[.]sh' "$recovery"; then
+  echo "error: recovery workflow must not rebuild the component" >&2
+  exit 1
+fi
+
+python3 - "$release" "$recovery" <<'PY'
 import pathlib
 import sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+recovery = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 ghcr = text.index("  ghcr:")
 finalize = text.index("  finalize:", ghcr)
 anonymous = text.index("Recheck draft assets and every anonymous OCI byte, then finalize")
@@ -101,6 +140,14 @@ if text.count("actions/attest-build-provenance@") != 1 or text.count("actions/at
     raise SystemExit("error: provenance/SBOM attestation cardinality drifted")
 if text.count("# This PATCH is the release transaction") != 1:
     raise SystemExit("error: final release transaction cardinality drifted")
+if recovery.count("actions/attest-build-provenance@") != 1 or recovery.count("actions/attest@") != 1:
+    raise SystemExit("error: recovery attestation cardinality drifted")
+if recovery.count('"$RUNNER_TEMP/oras-bin" push "$ref"') != 1:
+    raise SystemExit("error: recovery OCI push cardinality drifted")
+if recovery.count("gh release create v0.1.0") != 1:
+    raise SystemExit("error: recovery draft creation cardinality drifted")
+if recovery.count("# This PATCH is the release transaction") != 1:
+    raise SystemExit("error: recovery final transaction cardinality drifted")
 PY
 
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/echo-workflow-verifiers.XXXXXX")

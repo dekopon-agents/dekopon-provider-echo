@@ -1,0 +1,801 @@
+name: Recover v0.1.0 from immutable tag-CI artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Exact acknowledgement for the one pinned recovery
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-v0.1.0
+  cancel-in-progress: false
+
+env:
+  SOURCE_CI_RUN_ID: "32816234695"
+  SOURCE_SHA: 64293b0d2b37a864b7129286064a23fee24b163c
+  SOURCE_TAG: v0.1.0
+  SOURCE_TAG_OBJECT: 2914235ba1629663b4b88aa20a75f47f851e001c
+  EXPECTED_SHA: c15e88cf50726e8a80d1f73f8167563242d59ea80c1af026014e30054ac786b1
+  EXPECTED_SBOM_SHA: edb79de1af76838af4b36fdb5d3ba8ca52ac0339fdac61b33eb8145169cf42a4
+  RECOVERY_CONFIRMATION: recover-v0.1.0-from-tag-ci-32816234695
+  PROVIDER_RUST_TOOLCHAIN: "1.97.0"
+  WASM_TOOLS_VERSION: "1.236.1"
+  ORAS_VERSION: "1.2.3"
+  ORAS_LINUX_AMD64_SHA256: "b4efc97a91f471f323f193ea4b4d63d8ff443ca3aab514151a30751330852827"
+  OCI_REPOSITORY: "ghcr.io/dekopon-agents/provider-echo"
+
+jobs:
+  build:
+    name: recover and verify immutable tag-CI component
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # Verify green recovery CI and download one exact tag-CI artifact.
+      contents: read # Verify current main, annotated tag, and release absence.
+      packages: read # Prove the final GHCR package remains absent.
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Check out auditable recovery main without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify confirmation, recovery scope, green CI, tag, and destination absence
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = dekopon-agents/dekopon-provider-echo
+          test "$GITHUB_REF" = refs/heads/main
+          test "$CONFIRMATION" = "$RECOVERY_CONFIRMATION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --force --no-tags origin main:refs/remotes/origin/main
+          git fetch --force origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+          test "$(git cat-file -t "refs/tags/$SOURCE_TAG")" = tag
+          test "$(git rev-parse "refs/tags/$SOURCE_TAG")" = "$SOURCE_TAG_OBJECT"
+          test "$(git rev-parse "refs/tags/$SOURCE_TAG^{}")" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA"
+          changed=$(git diff --name-only "$SOURCE_SHA..$GITHUB_SHA" | LC_ALL=C sort)
+          test "$changed" = $'.github/workflows/recover-v0.1.0.yml\nscripts/recover-v0.1.0-artifacts.sh\nscripts/validate-workflows.sh'
+
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&event=push&per_page=100" \
+            >"$RUNNER_TEMP/main-runs.jsons"
+          jq -e --arg sha "$GITHUB_SHA" '
+            [.[].workflow_runs[] | select(
+              .name == "CI" and .path == ".github/workflows/ci.yml" and
+              .event == "push" and .head_sha == $sha and
+              .status == "completed" and .conclusion == "success"
+            )] | length == 1
+          ' "$RUNNER_TEMP/main-runs.jsons" >/dev/null
+
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$SOURCE_TAG" \
+            >"$RUNNER_TEMP/release.json" 2>"$RUNNER_TEMP/release.err"; then
+            echo 'error: v0.1.0 release already exists' >&2
+            exit 1
+          fi
+          grep -Eqi 'not found|404' "$RUNNER_TEMP/release.err"
+          if gh api /orgs/dekopon-agents/packages/container/provider-echo \
+            >"$RUNNER_TEMP/package.json" 2>"$RUNNER_TEMP/package.err"; then
+            echo 'error: provider-echo package already exists' >&2
+            exit 1
+          fi
+          grep -Eqi 'not found|404' "$RUNNER_TEMP/package.err"
+
+          status=$(curl --silent --show-error --location \
+            --output "$RUNNER_TEMP/attestations.json" --write-out '%{http_code}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/attestations/sha256:$EXPECTED_SHA")
+          case "$status" in
+            404) ;;
+            200)
+              jq -e '.attestations == []' "$RUNNER_TEMP/attestations.json" >/dev/null
+              ;;
+            *)
+              echo "error: attestation absence check returned HTTP $status" >&2
+              exit 1
+              ;;
+          esac
+          echo 'version=0.1.0' >>"$GITHUB_OUTPUT"
+
+      - name: Download and verify only the immutable tag-CI artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: ./scripts/recover-v0.1.0-artifacts.sh "$RUNNER_TEMP/tagged"
+
+      - name: Generate exact deterministic SBOM from the immutable tag source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/source"
+          git archive "$SOURCE_SHA" | tar -x -C "$RUNNER_TEMP/source"
+          rustup toolchain install "$PROVIDER_RUST_TOOLCHAIN" --profile minimal
+          RUSTUP_TOOLCHAIN="$PROVIDER_RUST_TOOLCHAIN" \
+            "$RUNNER_TEMP/source/scripts/generate-sbom.py" \
+              "$RUNNER_TEMP/echo-provider.cdx.json"
+          test "$(sha256sum "$RUNNER_TEMP/echo-provider.cdx.json" | awk '{print $1}')" =             "$EXPECTED_SBOM_SHA"
+          jq -e '
+            .bomFormat == "CycloneDX" and .specVersion == "1.5" and
+            .metadata.component.name == "dekopon-echo-provider" and
+            (.components | length) == 41
+          ' "$RUNNER_TEMP/echo-provider.cdx.json" >/dev/null
+
+      - name: Stage exact source artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -R "$RUNNER_TEMP/tagged/dist" "$GITHUB_WORKSPACE/dist"
+          ./scripts/verify-release-assets.sh "$PWD/dist"
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 2
+          test "$(sha256sum dist/echo-provider.wasm | awk '{print $1}')" = "$EXPECTED_SHA"
+          git diff --exit-code
+
+      - name: Re-upload exact tag-CI component for permission-separated recovery jobs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload deterministic tag-source SBOM for attestation only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-sbom
+          path: ${{ runner.temp }}/echo-provider.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    name: attest recovered component provenance and CycloneDX SBOM
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # Download only this recovery run's verified immutable artifacts.
+      contents: read # Bind attestations to this auditable recovery workflow commit.
+      id-token: write # Mint only the Sigstore identity for the attestations below.
+      attestations: write # Create provenance and SBOM attestations for exact recovered bytes.
+    steps:
+      - name: Download exact recovered release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Download deterministic tag-source SBOM
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-sbom
+          path: sbom
+      - name: Verify candidate shape, checksum, and SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 2
+          (cd dist && sha256sum --check --strict echo-provider.wasm.sha256)
+          test "$(sha256sum sbom/echo-provider.cdx.json | awk '{print $1}')" =             "$EXPECTED_SBOM_SHA"
+      - name: Attest both exact recovered release files
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/*
+      - name: Attest exact tag-source CycloneDX SBOM predicate for the component
+        uses: actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc # v2.4.0
+        with:
+          subject-path: dist/echo-provider.wasm
+          predicate-type: https://cyclonedx.org/bom
+          predicate-path: sbom/echo-provider.cdx.json
+
+  draft:
+    name: create and verify run-owned exact draft
+    needs: [build, attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # Download only this recovery run's verified immutable artifacts.
+      contents: write # Create, read, upload to, and delete only the captured draft release.
+      attestations: read # Verify only this recovery run's provenance and SBOM attestations.
+      packages: read # Prove the final package is absent before creating the draft.
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+      marker: ${{ steps.create.outputs.marker }}
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out verification scripts without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download exact release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Install pinned component validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$PROVIDER_RUST_TOOLCHAIN" --profile minimal
+          cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools \
+            --version "$WASM_TOOLS_VERSION" --locked
+      - name: Verify assets and both attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/verify-release-assets.sh "$PWD/dist"
+          for artifact in dist/echo-provider.wasm dist/echo-provider.wasm.sha256; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA"
+          done
+          gh attestation verify dist/echo-provider.wasm --repo "$GITHUB_REPOSITORY" \
+            --predicate-type https://cyclonedx.org/bom \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+            --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA"
+      - name: Prove the release and entire final GHCR package are absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" \
+            >"$RUNNER_TEMP/existing-release.json" 2>"$RUNNER_TEMP/release.err"; then
+            echo "error: immutable v0.1.0 release already exists" >&2
+            exit 1
+          fi
+          grep -Eqi 'not found|404' "$RUNNER_TEMP/release.err"
+          if gh api /orgs/dekopon-agents/packages/container/provider-echo \
+            >"$RUNNER_TEMP/existing-package.json" 2>"$RUNNER_TEMP/package.err"; then
+            echo "error: final provider-echo package already exists" >&2
+            exit 1
+          fi
+          grep -Eqi 'not found|404' "$RUNNER_TEMP/package.err"
+      - name: Create a run-marked draft with exactly two assets
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="provider-echo-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          printf '%s\n\nAwaiting verified OCI manifest before finalization.\n' "$marker" \
+            >"$RUNNER_TEMP/draft-notes.md"
+          gh release create v0.1.0 --verify-tag --draft --title v0.1.0 \
+            --notes-file "$RUNNER_TEMP/draft-notes.md" \
+            dist/echo-provider.wasm dist/echo-provider.wasm.sha256
+          release_id=
+          for _attempt in {1..30}; do
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq -s --arg marker "$marker" '
+                [.[][] | select(
+                  .draft == true and .tag_name == "v0.1.0" and
+                  ((.body // "") | startswith($marker))
+                )]
+              ' >"$RUNNER_TEMP/run-owned-drafts.json"
+            count=$(jq 'length' "$RUNNER_TEMP/run-owned-drafts.json")
+            if [[ "$count" -eq 1 ]]; then
+              release_id=$(jq -er '.[0].id' "$RUNNER_TEMP/run-owned-drafts.json")
+              break
+            fi
+            if [[ "$count" -gt 1 ]]; then
+              echo "error: multiple run-owned drafts became visible" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          echo "release_id=$release_id" >>"$GITHUB_OUTPUT"
+          echo "marker=$marker" >>"$GITHUB_OUTPUT"
+      - name: Redownload both draft assets by ID and compare bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.create.outputs.release_id }}
+          MARKER: ${{ steps.create.outputs.marker }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/draft.json"
+          jq -e --arg marker "$MARKER" '
+            .draft == true and .tag_name == "v0.1.0" and
+            ((.body // "") | startswith($marker)) and
+            ([.assets[].name] | sort) ==
+              ["echo-provider.wasm", "echo-provider.wasm.sha256"]
+          ' "$RUNNER_TEMP/draft.json" >/dev/null
+          mkdir "$RUNNER_TEMP/draft-assets"
+          for name in echo-provider.wasm echo-provider.wasm.sha256; do
+            asset_id=$(jq -er --arg name "$name" '
+              [.assets[] | select(.name == $name)] |
+              if length == 1 then .[0].id else error("asset cardinality") end
+            ' "$RUNNER_TEMP/draft.json")
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              >"$RUNNER_TEMP/draft-assets/$name"
+            cmp "dist/$name" "$RUNNER_TEMP/draft-assets/$name"
+          done
+          ./scripts/verify-release-assets.sh "$RUNNER_TEMP/draft-assets"
+
+  ghcr:
+    name: publish direct-final one-layer GHCR artifact and verify anonymously
+    needs: [build, draft]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # Download only this recovery run's verified immutable artifacts.
+      # Draft releases are visible to this job only with writable contents access.
+      contents: write # Read only the captured draft; no contents mutation occurs in this job.
+      packages: write # Create, validate, and publicize only the previously absent final package.
+    outputs:
+      manifest_digest: ${{ steps.publish.outputs.manifest_digest }}
+    steps:
+      - name: Check out manifest verifier without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download exact release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Install pinned ORAS from its verified archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${archive}" \
+            --output "$RUNNER_TEMP/$archive"
+          echo "$ORAS_LINUX_AMD64_SHA256  $RUNNER_TEMP/$archive" | \
+            sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" oras
+          install -m 0755 "$RUNNER_TEMP/oras" "$RUNNER_TEMP/oras-bin"
+          (cd dist && sha256sum --check --strict echo-provider.wasm.sha256)
+      - name: Authenticate only for the final push
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push only 0.1.0, verify manifest, make public, and pull anonymously
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+          MARKER: ${{ needs.draft.outputs.marker }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$VERSION" = 0.1.0
+          run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          ref="$OCI_REPOSITORY:$VERSION"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/owned-draft.json"
+          jq -e --arg marker "$MARKER" '
+            .draft == true and .tag_name == "v0.1.0" and
+            ((.body // "") | startswith($marker))
+          ' "$RUNNER_TEMP/owned-draft.json" >/dev/null
+          if "$RUNNER_TEMP/oras-bin" manifest fetch --descriptor "$ref" \
+            >"$RUNNER_TEMP/existing.json" 2>"$RUNNER_TEMP/existing.err"; then
+            echo "error: immutable final OCI reference already exists" >&2
+            exit 1
+          fi
+          grep -Eqi 'not found|manifest unknown|MANIFEST_UNKNOWN|404' "$RUNNER_TEMP/existing.err"
+          # Push from dist so the OCI layer title is the asset basename, not a workspace path.
+          (
+            cd dist
+            "$RUNNER_TEMP/oras-bin" push "$ref" \
+              --artifact-type application/vnd.dekopon.provider.v1+wasm \
+              --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --annotation "org.opencontainers.image.version=$VERSION" \
+              --annotation "org.opencontainers.image.revision=$SOURCE_SHA" \
+              --annotation "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
+              --annotation "org.dekopon.distribution.notices=embedded:dekopon.third-party-notices" \
+              --annotation "org.dekopon.release.run=$run" \
+              --annotation "org.dekopon.release.url=https://github.com/$GITHUB_REPOSITORY/releases/tag/v$VERSION" \
+              --annotation "org.dekopon.provider.capability=echo.echo" \
+              echo-provider.wasm:application/wasm
+          )
+          digest=$("$RUNNER_TEMP/oras-bin" manifest fetch --descriptor "$ref" | jq -er .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "manifest_digest=$digest" >>"$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/oras-bin" manifest fetch "$OCI_REPOSITORY@$digest" \
+            >"$RUNNER_TEMP/authenticated-manifest.json"
+          ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/authenticated-manifest.json" \
+            dist/echo-provider.wasm "$run" "$SOURCE_SHA"
+
+          for _ in {1..30}; do
+            visibility=$(gh api /orgs/dekopon-agents/packages/container/provider-echo \
+              --jq .visibility 2>/dev/null || true)
+            if [[ "$visibility" == public ]]; then break; fi
+            if [[ "$visibility" == private ]]; then
+              gh api --method PATCH \
+                /orgs/dekopon-agents/packages/container/provider-echo \
+                -f visibility=public >/dev/null
+            fi
+            sleep 2
+          done
+          test "$(gh api /orgs/dekopon-agents/packages/container/provider-echo --jq .visibility)" = public
+
+          docker logout ghcr.io
+          anonymous=(env -u GH_TOKEN -u GITHUB_TOKEN "$RUNNER_TEMP/oras-bin")
+          test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$digest"
+          "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/anonymous-manifest.json"
+          ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/anonymous-manifest.json" \
+            dist/echo-provider.wasm "$run" "$SOURCE_SHA"
+          mkdir "$RUNNER_TEMP/anonymous-pull"
+          "${anonymous[@]}" pull "$ref" --output "$RUNNER_TEMP/anonymous-pull"
+          test "$(find "$RUNNER_TEMP/anonymous-pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
+          cmp dist/echo-provider.wasm "$RUNNER_TEMP/anonymous-pull/echo-provider.wasm"
+          expected=$(awk '{print $1}' dist/echo-provider.wasm.sha256)
+          test "sha256:$expected" = "$(jq -er '.layers[0].digest' "$RUNNER_TEMP/anonymous-manifest.json")"
+
+          gh api --paginate \
+            /orgs/dekopon-agents/packages/container/provider-echo/versions?per_page=100 \
+            >"$RUNNER_TEMP/versions.jsons"
+          jq -se --arg digest "$digest" '
+            [.[][]] as $versions |
+            ($versions | length) == 1 and
+            $versions[0].name == $digest and
+            (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+          ' "$RUNNER_TEMP/versions.jsons" >/dev/null
+
+  finalize:
+    name: verify public bytes and finalize release as the last mutation
+    needs: [build, draft, ghcr]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # Download only this recovery run's verified immutable artifacts.
+      contents: write # Read draft assets and finalize only the captured release ID.
+      attestations: read # Reverify this recovery run's provenance and SBOM attestations.
+      packages: read # Recheck exact final package/version cardinality before publication.
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out verification scripts without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download exact release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Install pinned ORAS and component validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${archive}" \
+            --output "$RUNNER_TEMP/$archive"
+          echo "$ORAS_LINUX_AMD64_SHA256  $RUNNER_TEMP/$archive" | \
+            sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" oras
+          rustup toolchain install "$PROVIDER_RUST_TOOLCHAIN" --profile minimal
+          cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools \
+            --version "$WASM_TOOLS_VERSION" --locked
+      - name: Recheck draft assets and every anonymous OCI byte, then finalize
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+          MARKER: ${{ needs.draft.outputs.marker }}
+          MANIFEST_DIGEST: ${{ needs.ghcr.outputs.manifest_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$VERSION" = 0.1.0
+          [[ "$MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          ref="$OCI_REPOSITORY:$VERSION"
+          ./scripts/verify-release-assets.sh "$PWD/dist"
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/final-draft.json"
+          jq -e --arg marker "$MARKER" '
+            .draft == true and .tag_name == "v0.1.0" and
+            ((.body // "") | startswith($marker)) and
+            ([.assets[].name] | sort) ==
+              ["echo-provider.wasm", "echo-provider.wasm.sha256"]
+          ' "$RUNNER_TEMP/final-draft.json" >/dev/null
+          mkdir "$RUNNER_TEMP/final-draft-assets"
+          for name in echo-provider.wasm echo-provider.wasm.sha256; do
+            asset_id=$(jq -er --arg name "$name" '
+              [.assets[] | select(.name == $name)] |
+              if length == 1 then .[0].id else error("asset cardinality") end
+            ' "$RUNNER_TEMP/final-draft.json")
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              >"$RUNNER_TEMP/final-draft-assets/$name"
+            cmp "dist/$name" "$RUNNER_TEMP/final-draft-assets/$name"
+          done
+          ./scripts/verify-release-assets.sh "$RUNNER_TEMP/final-draft-assets"
+          for artifact in dist/echo-provider.wasm dist/echo-provider.wasm.sha256; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA"
+          done
+          gh attestation verify dist/echo-provider.wasm --repo "$GITHUB_REPOSITORY" \
+            --predicate-type https://cyclonedx.org/bom \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+            --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA"
+
+          anonymous=(env -u GH_TOKEN -u GITHUB_TOKEN "$RUNNER_TEMP/oras")
+          test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$MANIFEST_DIGEST"
+          "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/final-manifest.json"
+          ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/final-manifest.json" \
+            dist/echo-provider.wasm "$run" "$SOURCE_SHA"
+          mkdir "$RUNNER_TEMP/final-pull"
+          "${anonymous[@]}" pull "$ref" --output "$RUNNER_TEMP/final-pull"
+          test "$(find "$RUNNER_TEMP/final-pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
+          cmp dist/echo-provider.wasm "$RUNNER_TEMP/final-pull/echo-provider.wasm"
+
+          cat >"$RUNNER_TEMP/release-notes.md" <<EOF
+          $MARKER
+
+          This release uses the exact immutable component artifact from successful tag CI run
+          \`32816234695\`; publication and attestations were completed by the pinned recovery
+          workflow after the original release run failed before producing any artifact.
+
+          Import-free structured echo and Unicode message transformations. OCI manifest:
+          \`$OCI_REPOSITORY@$MANIFEST_DIGEST\` (tag \`0.1.0\`). The anonymous OCI layer is byte-identical
+          to \`echo-provider.wasm\`; verify it with the attached SHA-256 file.
+
+          Semantics: \`echo.echo\` returns the supplied semantic JSON value unchanged. The four
+          message transformations require exactly one string field, use Rust Unicode scalar/case
+          behavior, and have stable provider errors. This component has no imports or command words.
+          Duplicate JSON object names use serde_json's last-value-wins behavior. Production hosts
+          must enforce the documented 1 MiB input/output, 64 MiB memory, 50M fuel, and 30s limits.
+          No latest or temporary tag is published. The distribution license is **MIT OR Apache-2.0**.
+          EOF
+          "$GITHUB_WORKSPACE/scripts/embed-license-bundle.py" write \
+            "$RUNNER_TEMP/license-bundle.txt" "$GITHUB_WORKSPACE"
+          {
+            printf '\n## Complete distribution license bundle\n\n'
+            cat "$RUNNER_TEMP/license-bundle.txt"
+          } >>"$RUNNER_TEMP/release-notes.md"
+          "$GITHUB_WORKSPACE/scripts/embed-license-bundle.py" verify-text \
+            "$RUNNER_TEMP/release-notes.md" "$GITHUB_WORKSPACE"
+          test "$(wc -c <"$RUNNER_TEMP/release-notes.md")" -le 125000
+          jq -n --rawfile body "$RUNNER_TEMP/release-notes.md" '{
+            draft: false,
+            prerelease: false,
+            make_latest: "false",
+            name: "v0.1.0",
+            body: $body
+          }' >"$RUNNER_TEMP/publish.json"
+
+          # Revalidate immutable source identity immediately before the final mutation.
+          git fetch --force origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          git fetch --force --no-tags origin main:refs/remotes/origin/main
+          test "$(git cat-file -t "refs/tags/$SOURCE_TAG")" = tag
+          test "$(git rev-parse "$SOURCE_TAG^{}")" = "$SOURCE_SHA"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+
+          # Revalidate the complete public OCI and owned-draft cardinality immediately before the
+          # final mutation. A concurrent extra tag, version, or run-owned draft must stop release.
+          "${anonymous[@]}" repo tags "$OCI_REPOSITORY" --output json \
+            >"$RUNNER_TEMP/final-tags.json"
+          jq -e '(.tags | sort) == ["0.1.0"]' "$RUNNER_TEMP/final-tags.json" >/dev/null
+          test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
+            "$MANIFEST_DIGEST"
+          gh api --paginate \
+            /orgs/dekopon-agents/packages/container/provider-echo/versions?per_page=100 \
+            >"$RUNNER_TEMP/final-versions.jsons"
+          jq -se --arg digest "$MANIFEST_DIGEST" '
+            [.[][]] as $versions |
+            ($versions | length) == 1 and
+            $versions[0].name == $digest and
+            (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+          ' "$RUNNER_TEMP/final-versions.jsons" >/dev/null
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -s --arg marker "$MARKER" --arg release_id "$RELEASE_ID" '
+              [.[][] | select(
+                .draft == true and .tag_name == "v0.1.0" and
+                ((.body // "") | startswith($marker))
+              )] |
+              length == 1 and (.[0].id | tostring) == $release_id
+            ' >"$RUNNER_TEMP/final-owned-draft.json"
+          jq -e '. == true' "$RUNNER_TEMP/final-owned-draft.json" >/dev/null
+
+          # This PATCH is the release transaction's final mutation. Everything above is read-only.
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --input "$RUNNER_TEMP/publish.json" >"$RUNNER_TEMP/published.json"
+          jq -e --arg marker "$MARKER" '
+            .draft == false and .tag_name == "v0.1.0" and
+            ((.body // "") | startswith($marker))
+          ' "$RUNNER_TEMP/published.json" >/dev/null
+
+  verify_final:
+    name: anonymous credentials-free verification after finalization
+    needs: [build, finalize, ghcr]
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Verify public release, both attestations, and one-layer OCI bytes anonymously
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          MANIFEST_DIGEST: ${{ needs.ghcr.outputs.manifest_digest }}
+        run: |
+          set -euo pipefail
+          test "$VERSION" = 0.1.0
+          test -z "${GH_TOKEN-}${GITHUB_TOKEN-}"
+          repo="$GITHUB_REPOSITORY"
+          source="https://raw.githubusercontent.com/$repo/$GITHUB_SHA"
+          for script in verify-attestation-anonymously.sh verify-oci-manifest.py; do
+            curl --fail --silent --show-error --location \
+              "$source/scripts/$script" --output "$RUNNER_TEMP/$script"
+            chmod 0755 "$RUNNER_TEMP/$script"
+          done
+          curl --fail --silent --show-error --location \
+            "https://api.github.com/repos/$repo/releases/tags/v0.1.0" \
+            --output "$RUNNER_TEMP/release.json"
+          jq -e '
+            .draft == false and .prerelease == false and
+            ([.assets[].name] | sort) == ["echo-provider.wasm","echo-provider.wasm.sha256"]
+          ' "$RUNNER_TEMP/release.json" >/dev/null
+          mkdir "$RUNNER_TEMP/release"
+          for name in echo-provider.wasm echo-provider.wasm.sha256; do
+            url=$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .browser_download_url' \
+              "$RUNNER_TEMP/release.json")
+            curl --fail --silent --show-error --location "$url" \
+              --output "$RUNNER_TEMP/release/$name"
+          done
+          (cd "$RUNNER_TEMP/release" && sha256sum --check --strict echo-provider.wasm.sha256)
+          expected=$(awk '{print $1}' "$RUNNER_TEMP/release/echo-provider.wasm.sha256")
+          signer="$repo/.github/workflows/recover-v0.1.0.yml"
+          "$RUNNER_TEMP/verify-attestation-anonymously.sh" \
+            "$RUNNER_TEMP/release/echo-provider.wasm" "$repo" "$expected" \
+            https://slsa.dev/provenance/v1 "$signer" "$GITHUB_REF" "$GITHUB_SHA" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          "$RUNNER_TEMP/verify-attestation-anonymously.sh" \
+            "$RUNNER_TEMP/release/echo-provider.wasm" "$repo" "$expected" \
+            https://cyclonedx.org/bom "$signer" "$GITHUB_REF" "$GITHUB_SHA" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+
+          archive="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${archive}" \
+            --output "$RUNNER_TEMP/$archive"
+          echo "$ORAS_LINUX_AMD64_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" oras
+          ref="$OCI_REPOSITORY:$VERSION"
+          test "$("$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
+            "$MANIFEST_DIGEST"
+          "$RUNNER_TEMP/oras" manifest fetch "$ref" >"$RUNNER_TEMP/manifest.json"
+          run=$(jq -er '.annotations["org.dekopon.release.run"]' "$RUNNER_TEMP/manifest.json")
+          "$RUNNER_TEMP/verify-oci-manifest.py" "$RUNNER_TEMP/manifest.json" \
+            "$RUNNER_TEMP/release/echo-provider.wasm" "$run" "$SOURCE_SHA"
+          mkdir "$RUNNER_TEMP/pull"
+          "$RUNNER_TEMP/oras" pull "$ref" --output "$RUNNER_TEMP/pull"
+          test "$(find "$RUNNER_TEMP/pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
+          cmp "$RUNNER_TEMP/release/echo-provider.wasm" "$RUNNER_TEMP/pull/echo-provider.wasm"
+
+  cleanup_failed_release:
+    name: remove only this failed run's proven release and sole final manifest
+    if: ${{ always() && needs.verify_final.result != 'success' }}
+    needs: [build, draft, ghcr, finalize, verify_final]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # Delete only this recovery run's marker-owned release on failure.
+      packages: write # Remove only this recovery run's exact manifest/package on failure.
+    steps:
+      - name: Install pinned ORAS
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${archive}" \
+            --output "$RUNNER_TEMP/$archive"
+          echo "$ORAS_LINUX_AMD64_SHA256  $RUNNER_TEMP/$archive" | \
+            sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" oras
+      - name: Authenticate for narrowly verified cleanup
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify run ownership and remove OCI effect before draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+          MARKER: ${{ needs.draft.outputs.marker }}
+          EXPECTED_DIGEST: ${{ needs.ghcr.outputs.manifest_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          expected_marker="provider-echo-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          [[ -z "$MARKER" || "$MARKER" == "$expected_marker" ]]
+          [[ -z "$EXPECTED_DIGEST" || "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          release_id=$RELEASE_ID
+          release_owned=false
+          if [[ -n "$release_id" ]]; then
+            [[ "$release_id" =~ ^[0-9]+$ ]]
+            endpoint="repos/$GITHUB_REPOSITORY/releases/$release_id"
+          else
+            endpoint="repos/$GITHUB_REPOSITORY/releases?per_page=100"
+          fi
+          if [[ -n "$release_id" ]]; then
+            gh api "$endpoint" >"$RUNNER_TEMP/release.json" 2>"$RUNNER_TEMP/release.err" || true
+          else
+            gh api --paginate "$endpoint" | jq -s 'add' >"$RUNNER_TEMP/releases.json"
+            jq --arg marker "$expected_marker" '
+              [.[] | select(
+                .tag_name == "v0.1.0" and ((.body // "") | startswith($marker))
+              )] |
+              if length == 1 then .[0] elif length == 0 then null
+              else error("multiple run-owned releases") end
+            ' "$RUNNER_TEMP/releases.json" >"$RUNNER_TEMP/release.json"
+          fi
+          if jq -e --arg marker "$expected_marker" '
+            . != null and .tag_name == "v0.1.0" and
+            ((.body // "") | startswith($marker))
+          ' "$RUNNER_TEMP/release.json" >/dev/null 2>&1; then
+            release_owned=true
+            release_id=$(jq -er .id "$RUNNER_TEMP/release.json")
+            jq -e '.draft == true or .draft == false' "$RUNNER_TEMP/release.json" >/dev/null
+          fi
+
+          ref="$OCI_REPOSITORY:0.1.0"
+          digest=
+          if descriptor=$("$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" \
+            2>"$RUNNER_TEMP/descriptor.err"); then
+            digest=$(jq -er .digest <<<"$descriptor")
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ -z "$EXPECTED_DIGEST" || "$digest" == "$EXPECTED_DIGEST" ]]
+            "$RUNNER_TEMP/oras" manifest fetch "$OCI_REPOSITORY@$digest" \
+              >"$RUNNER_TEMP/owned-manifest.json"
+            jq -e --arg run "$run" --arg revision "$SOURCE_SHA" '
+              .artifactType == "application/vnd.dekopon.provider.v1+wasm" and
+              .annotations["org.dekopon.release.run"] == $run and
+              .annotations["org.opencontainers.image.source"] ==
+                "https://github.com/dekopon-agents/dekopon-provider-echo" and
+              .annotations["org.opencontainers.image.version"] == "0.1.0" and
+              .annotations["org.opencontainers.image.revision"] == $revision and
+              .annotations["org.opencontainers.image.licenses"] ==
+                "MIT OR Apache-2.0" and
+              .annotations["org.dekopon.distribution.notices"] ==
+                "embedded:dekopon.third-party-notices" and
+              (.layers | length) == 1 and .layers[0].mediaType == "application/wasm"
+            ' "$RUNNER_TEMP/owned-manifest.json" >/dev/null
+
+            gh api --paginate \
+              /orgs/dekopon-agents/packages/container/provider-echo/versions?per_page=100 \
+              >"$RUNNER_TEMP/cleanup-versions.jsons"
+            version_id=$(jq -ser --arg digest "$digest" '
+              [.[][]] as $versions |
+              if ($versions | length) == 1 and
+                 $versions[0].name == $digest and
+                 (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+              then $versions[0].id
+              else error("manifest is missing, shared, or has another tag/version") end
+            ' "$RUNNER_TEMP/cleanup-versions.jsons")
+            [[ "$version_id" =~ ^[0-9]+$ ]]
+            gh api --method DELETE \
+              "/orgs/dekopon-agents/packages/container/provider-echo/versions/$version_id"
+            if "$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" \
+              >/dev/null 2>"$RUNNER_TEMP/deleted.err"; then
+              echo "error: run-owned final OCI reference survived cleanup" >&2
+              exit 1
+            fi
+            grep -Eqi 'not found|manifest unknown|MANIFEST_UNKNOWN|404' "$RUNNER_TEMP/deleted.err"
+          elif ! grep -Eqi 'not found|manifest unknown|MANIFEST_UNKNOWN|404' \
+            "$RUNNER_TEMP/descriptor.err"; then
+            cat "$RUNNER_TEMP/descriptor.err" >&2
+            exit 1
+          fi
+
+          if [[ "$release_owned" == true ]]; then
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+          fi
