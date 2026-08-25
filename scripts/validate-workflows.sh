@@ -6,8 +6,9 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 ci="$root/.github/workflows/ci.yml"
 release="$root/.github/workflows/release.yml"
 verifier="$root/scripts/verify-oci-manifest.py"
-[[ -f "$ci" && -f "$release" && -f "$verifier" ]] || {
-  echo "error: CI, release workflow, and OCI verifier are required" >&2
+attestation_verifier="$root/scripts/verify-attestation-anonymously.sh"
+[[ -f "$ci" && -f "$release" && -f "$verifier" && -f "$attestation_verifier" ]] || {
+  echo "error: CI, release workflow, attestation verifier, and OCI verifier are required" >&2
   exit 1
 }
 
@@ -27,7 +28,10 @@ for required in \
   'tags:' \
   '"v0.1.0"' \
   'test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag' \
-  'git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main' \
+  'test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"' \
+  'for _attempt in {1..30}; do' \
+  'multiple run-owned drafts became visible' \
+  'Revalidate immutable source identity immediately before the final mutation' \
   'application/vnd.dekopon.provider.v1+wasm' \
   'echo-provider.wasm:application/wasm' \
   'org.dekopon.release.run' \
@@ -44,6 +48,7 @@ for required in \
   'make_latest: "false"' \
   'permissions: {}' \
   'verify-attestation-anonymously.sh' \
+  '"$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"' \
   'draft: false'; do
   grep -Fq "$required" "$release" || {
     echo "error: release workflow omits required interlock: $required" >&2
@@ -84,9 +89,51 @@ if text.count("# This PATCH is the release transaction") != 1:
     raise SystemExit("error: final release transaction cardinality drifted")
 PY
 
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/echo-oci-verifier.XXXXXX")
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/echo-workflow-verifiers.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT
+mkdir "$temporary/mock-bin"
 printf 'component fixture\n' >"$temporary/echo-provider.wasm"
+cat >"$temporary/attestations.json" <<'JSON'
+{"attestations":[{"bundle":{"attempt":"old"}},{"bundle":{"attempt":"current"}}]}
+JSON
+cat >"$temporary/mock-bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+output=
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --output ]]; then output=$2; shift 2; else shift; fi
+done
+cp "$MOCK_ATTESTATIONS" "$output"
+printf '200'
+SH
+cat >"$temporary/mock-bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+bundle=
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --bundle ]]; then bundle=$2; shift 2; else shift; fi
+done
+attempt=$(jq -er .attempt "$bundle")
+if [[ "$attempt" == current ]]; then
+  invocation="$MOCK_CURRENT_INVOCATION"
+else
+  invocation="https://github.com/dekopon-agents/dekopon-provider-echo/actions/runs/1/attempts/1"
+fi
+jq -cn --arg invocation "$invocation" '[{
+  verificationResult:{signature:{certificate:{runInvocationURI:$invocation}}}
+}]'
+SH
+chmod 0755 "$temporary/mock-bin/curl" "$temporary/mock-bin/gh"
+PATH="$temporary/mock-bin:$PATH" \
+MOCK_ATTESTATIONS="$temporary/attestations.json" \
+MOCK_CURRENT_INVOCATION="https://github.com/dekopon-agents/dekopon-provider-echo/actions/runs/42/attempts/3" \
+GITHUB_API_URL=https://example.invalid \
+  "$attestation_verifier" "$temporary/echo-provider.wasm" \
+    dekopon-agents/dekopon-provider-echo "$(printf 'a%.0s' {1..64})" \
+    https://slsa.dev/provenance/v1 \
+    dekopon-agents/dekopon-provider-echo/.github/workflows/release.yml \
+    refs/tags/v0.1.0 "$(printf 'b%.0s' {1..40})" 42 3 >/dev/null
+
 python3 - "$temporary/manifest.json" "$temporary/echo-provider.wasm" <<'PY'
 import hashlib
 import json

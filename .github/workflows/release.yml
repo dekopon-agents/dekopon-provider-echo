@@ -40,7 +40,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify repository, annotated tag, version, SHA, and main ancestry
+      - name: Verify repository, annotated tag, version, SHA, and exact current main
         id: identity
         shell: bash
         run: |
@@ -54,8 +54,8 @@ jobs:
             jq -er '.packages[] | select(.name == "dekopon-echo-provider") | .version')
           test "$version" = 0.1.0
           test "$GITHUB_REF_NAME" = "v$version"
-          git fetch --no-tags origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          git fetch --force --no-tags origin main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
           test -z "$(git ls-files '*.wasm')"
           echo "version=$version" >>"$GITHUB_OUTPUT"
       - name: Install all pinned release tools
@@ -231,15 +231,27 @@ jobs:
           gh release create v0.1.0 --verify-tag --draft --title v0.1.0 \
             --notes-file "$RUNNER_TEMP/draft-notes.md" \
             dist/echo-provider.wasm dist/echo-provider.wasm.sha256
-          release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-            jq -ser --arg marker "$marker" '
-              [.[][] | select(
-                .draft == true and .tag_name == "v0.1.0" and
-                ((.body // "") | startswith($marker))
-              )] |
-              if length == 1 then .[0].id else error("run-owned draft cardinality") end
-            ')
-          test "$release_id" -gt 0
+          release_id=
+          for _attempt in {1..30}; do
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq -s --arg marker "$marker" '
+                [.[][] | select(
+                  .draft == true and .tag_name == "v0.1.0" and
+                  ((.body // "") | startswith($marker))
+                )]
+              ' >"$RUNNER_TEMP/run-owned-drafts.json"
+            count=$(jq 'length' "$RUNNER_TEMP/run-owned-drafts.json")
+            if [[ "$count" -eq 1 ]]; then
+              release_id=$(jq -er '.[0].id' "$RUNNER_TEMP/run-owned-drafts.json")
+              break
+            fi
+            if [[ "$count" -gt 1 ]]; then
+              echo "error: multiple run-owned drafts became visible" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          [[ "$release_id" =~ ^[0-9]+$ ]]
           echo "release_id=$release_id" >>"$GITHUB_OUTPUT"
           echo "marker=$marker" >>"$GITHUB_OUTPUT"
       - name: Redownload both draft assets by ID and compare bytes
@@ -512,6 +524,13 @@ jobs:
             body: $body
           }' >"$RUNNER_TEMP/publish.json"
 
+          # Revalidate immutable source identity immediately before the final mutation.
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git fetch --force --no-tags origin main:refs/remotes/origin/main
+          test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+          test "$(git rev-parse "$GITHUB_REF_NAME^{}")" = "$GITHUB_SHA"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+
           # This PATCH is the release transaction's final mutation. Everything above is read-only.
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             --input "$RUNNER_TEMP/publish.json" >"$RUNNER_TEMP/published.json"
@@ -561,10 +580,12 @@ jobs:
           signer="$repo/.github/workflows/release.yml"
           "$RUNNER_TEMP/verify-attestation-anonymously.sh" \
             "$RUNNER_TEMP/release/echo-provider.wasm" "$repo" "$expected" \
-            https://slsa.dev/provenance/v1 "$signer" "$GITHUB_REF" "$GITHUB_SHA"
+            https://slsa.dev/provenance/v1 "$signer" "$GITHUB_REF" "$GITHUB_SHA" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
           "$RUNNER_TEMP/verify-attestation-anonymously.sh" \
             "$RUNNER_TEMP/release/echo-provider.wasm" "$repo" "$expected" \
-            https://cyclonedx.org/bom "$signer" "$GITHUB_REF" "$GITHUB_SHA"
+            https://cyclonedx.org/bom "$signer" "$GITHUB_REF" "$GITHUB_SHA" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
           archive="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
           curl --fail --silent --show-error --location \
