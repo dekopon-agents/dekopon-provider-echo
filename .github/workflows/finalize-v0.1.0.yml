@@ -1,0 +1,390 @@
+name: Finalize v0.1.0 from exact recovery residual
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Exact acknowledgement for the pinned residual finalization
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-v0.1.0
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: 64293b0d2b37a864b7129286064a23fee24b163c
+  SOURCE_TAG: v0.1.0
+  SOURCE_TAG_OBJECT: 2914235ba1629663b4b88aa20a75f47f851e001c
+  ATTEST_SHA: 71efdf591285e4d9349e59e6fd62d7f9752696d9
+  ATTEST_REF: refs/heads/main
+  ATTEST_RUN_ID: "32822577381"
+  ATTEST_RUN_ATTEMPT: "1"
+  PRIOR_RELEASE_ID: "376223263"
+  PRIOR_WASM_ASSET_ID: "528836226"
+  PRIOR_CHECKSUM_ASSET_ID: "528836225"
+  PRIOR_MANIFEST_DIGEST: sha256:a59cd8871e39213a5333bc1141dda7a8941cae1771e4aab04c7a9612267d3833
+  EXPECTED_SHA: c15e88cf50726e8a80d1f73f8167563242d59ea80c1af026014e30054ac786b1
+  EXPECTED_CHECKSUM_SHA: a395d01420d7ef11cec85e4408dac1f5c1a7b0b1d2ebb8755b44f9e8cba7ad2a
+  EXPECTED_SBOM_SHA: edb79de1af76838af4b36fdb5d3ba8ca52ac0339fdac61b33eb8145169cf42a4
+  PRIOR_MARKER: provider-echo-run:32822577381:1
+  RECOVERY_CONFIRMATION: finalize-v0.1.0-residual-from-run-32822577381
+  PROVIDER_RUST_TOOLCHAIN: "1.97.0"
+  WASM_TOOLS_VERSION: "1.236.1"
+  ORAS_VERSION: "1.2.3"
+  ORAS_LINUX_AMD64_SHA256: "b4efc97a91f471f323f193ea4b4d63d8ff443ca3aab514151a30751330852827"
+  OCI_REPOSITORY: ghcr.io/dekopon-agents/provider-echo
+  PACKAGE_ENDPOINT: orgs/dekopon-agents/packages/container/provider-echo
+
+jobs:
+  finalize:
+    name: Verify the exact residual and perform its sole final release mutation
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # Verify only the pinned prior recovery run and its immutable artifacts.
+      contents: write # Read the captured draft assets and finalize only that release ID.
+      attestations: read # Verify only the pinned recovery provenance and SBOM attestations.
+      packages: read # Recheck the exact public residual package/version; never mutate it.
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out auditable finalizer main without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install exact public verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$PROVIDER_RUST_TOOLCHAIN" --profile minimal
+          cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools \
+            --version "$WASM_TOOLS_VERSION" --locked
+          archive="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${archive}" \
+            --output "$RUNNER_TEMP/$archive"
+          echo "$ORAS_LINUX_AMD64_SHA256  $RUNNER_TEMP/$archive" | \
+            sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" oras
+
+      - name: Verify current main, source tag, prior run, artifact chain, and exact residual IDs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = dekopon-agents/dekopon-provider-echo
+          test "$GITHUB_REF" = refs/heads/main
+          test "$CONFIRMATION" = "$RECOVERY_CONFIRMATION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --force --no-tags origin main:refs/remotes/origin/main
+          git fetch --force origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+          test "$(git cat-file -t "refs/tags/$SOURCE_TAG")" = tag
+          test "$(git rev-parse "refs/tags/$SOURCE_TAG")" = "$SOURCE_TAG_OBJECT"
+          test "$(git rev-parse "refs/tags/$SOURCE_TAG^{}")" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" "$ATTEST_SHA"
+          git merge-base --is-ancestor "$ATTEST_SHA" "$GITHUB_SHA"
+          changed=$(git diff --name-only "$SOURCE_SHA..$GITHUB_SHA" | LC_ALL=C sort)
+          test "$changed" = $'.github/workflows/finalize-v0.1.0.yml\n.github/workflows/recover-v0.1.0.yml\nscripts/recover-v0.1.0-artifacts.sh\nscripts/validate-workflows.sh'
+
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&event=push&per_page=100" \
+            >"$RUNNER_TEMP/main-runs.jsons"
+          jq -e --arg sha "$GITHUB_SHA" '
+            [.[].workflow_runs[] | select(
+              .name == "CI" and .path == ".github/workflows/ci.yml" and
+              .event == "push" and .head_sha == $sha and
+              .status == "completed" and .conclusion == "success"
+            )] | length == 1
+          ' "$RUNNER_TEMP/main-runs.jsons" >/dev/null
+
+          prior=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ATTEST_RUN_ID")
+          jq -e --arg sha "$ATTEST_SHA" --argjson id "$ATTEST_RUN_ID" '
+            .id == $id and .path == ".github/workflows/recover-v0.1.0.yml" and
+            .event == "workflow_dispatch" and .status == "completed" and
+            .conclusion == "failure" and .head_branch == "main" and
+            .head_sha == $sha and .run_attempt == 1
+          ' <<<"$prior" >/dev/null
+          jobs=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ATTEST_RUN_ID/jobs?filter=all&per_page=100")
+          jq -e \
+            --arg cleanup_name "remove only this failed run's proven release and sole final manifest" '
+            .total_count == 7 and
+            ([.jobs[] | {name, conclusion}] | sort_by(.name)) == ([
+              {name: "recover and verify immutable tag-CI component", conclusion: "success"},
+              {name: "attest recovered component provenance and CycloneDX SBOM", conclusion: "success"},
+              {name: "create and verify run-owned exact draft", conclusion: "success"},
+              {name: "publish direct-final one-layer GHCR artifact and verify anonymously", conclusion: "success"},
+              {name: "verify public bytes and finalize release as the last mutation", conclusion: "failure"},
+              {name: $cleanup_name, conclusion: "failure"},
+              {name: "anonymous credentials-free verification after finalization", conclusion: "skipped"}
+            ] | sort_by(.name))
+          ' <<<"$jobs" >/dev/null
+
+          artifacts=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ATTEST_RUN_ID/artifacts?per_page=100")
+          jq -e --arg sha "$ATTEST_SHA" '
+            .total_count == 2 and
+            ([.artifacts[] | {
+              id, name, size_in_bytes, digest, expired,
+              run: .workflow_run.id, branch: .workflow_run.head_branch,
+              sha: .workflow_run.head_sha
+            }] | sort_by(.id)) == ([
+              {
+                id: 9553724001, name: "release-assets", size_in_bytes: 64465,
+                digest: "sha256:689b87ba071ae0b53005f53557770df39791133bb7100c28df91a7a7e24f6c4e",
+                expired: false, run: 32822577381, branch: "main", sha: $sha
+              },
+              {
+                id: 9553724376, name: "release-sbom", size_in_bytes: 1372,
+                digest: "sha256:9badcaf451bec7c425bc6c6adf6ef1fe60a5fb87f9109f7d8d0bdd5a542fb24b",
+                expired: false, run: 32822577381, branch: "main", sha: $sha
+              }
+            ] | sort_by(.id))
+          ' <<<"$artifacts" >/dev/null
+
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -s 'add' >"$RUNNER_TEMP/releases.json"
+          jq -e --arg marker "$PRIOR_MARKER" --argjson id "$PRIOR_RELEASE_ID" '
+            [.[] | select(.tag_name == "v0.1.0")] as $items |
+            ($items | length) == 1 and $items[0].id == $id and
+            $items[0].draft == true and $items[0].prerelease == false and
+            (($items[0].body // "") | startswith($marker))
+          ' "$RUNNER_TEMP/releases.json" >/dev/null
+          package=$(gh api "$PACKAGE_ENDPOINT")
+          jq -e '
+            .name == "provider-echo" and .package_type == "container" and
+            .visibility == "public"
+          ' <<<"$package" >/dev/null
+          gh api --paginate "$PACKAGE_ENDPOINT/versions?per_page=100" |
+            jq -s 'add' >"$RUNNER_TEMP/versions.json"
+          jq -e --arg digest "$PRIOR_MANIFEST_DIGEST" '
+            length == 1 and .[0].name == $digest and
+            ((.[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+          ' "$RUNNER_TEMP/versions.json" >/dev/null
+
+      - name: Reverify draft bytes, attestations, tag-source SBOM, and public OCI residual
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/$PRIOR_RELEASE_ID")
+          jq -e \
+            --arg marker "$PRIOR_MARKER" \
+            --argjson release_id "$PRIOR_RELEASE_ID" \
+            --argjson wasm_id "$PRIOR_WASM_ASSET_ID" \
+            --argjson checksum_id "$PRIOR_CHECKSUM_ASSET_ID" '
+              .id == $release_id and .tag_name == "v0.1.0" and
+              .draft == true and .prerelease == false and
+              ((.body // "") | startswith($marker)) and
+              ([.assets[] | {id, name, size, digest}] | sort_by(.name)) == ([
+                {
+                  id: $wasm_id, name: "echo-provider.wasm", size: 150036,
+                  digest: "sha256:c15e88cf50726e8a80d1f73f8167563242d59ea80c1af026014e30054ac786b1"
+                },
+                {
+                  id: $checksum_id, name: "echo-provider.wasm.sha256", size: 85,
+                  digest: "sha256:a395d01420d7ef11cec85e4408dac1f5c1a7b0b1d2ebb8755b44f9e8cba7ad2a"
+                }
+              ] | sort_by(.name))
+            ' <<<"$release" >/dev/null
+          mkdir "$RUNNER_TEMP/draft-assets"
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$PRIOR_WASM_ASSET_ID" \
+            >"$RUNNER_TEMP/draft-assets/echo-provider.wasm"
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$PRIOR_CHECKSUM_ASSET_ID" \
+            >"$RUNNER_TEMP/draft-assets/echo-provider.wasm.sha256"
+          ./scripts/verify-release-assets.sh "$RUNNER_TEMP/draft-assets"
+          test "$(sha256sum "$RUNNER_TEMP/draft-assets/echo-provider.wasm" | awk '{print $1}')" = \
+            "$EXPECTED_SHA"
+          test "$(sha256sum "$RUNNER_TEMP/draft-assets/echo-provider.wasm.sha256" | awk '{print $1}')" = \
+            "$EXPECTED_CHECKSUM_SHA"
+
+          for artifact in \
+            "$RUNNER_TEMP/draft-assets/echo-provider.wasm" \
+            "$RUNNER_TEMP/draft-assets/echo-provider.wasm.sha256"; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+              --source-ref "$ATTEST_REF" --source-digest "$ATTEST_SHA"
+          done
+          ./scripts/verify-attestation-anonymously.sh \
+            "$RUNNER_TEMP/draft-assets/echo-provider.wasm" \
+            "$GITHUB_REPOSITORY" "$EXPECTED_SHA" \
+            https://slsa.dev/provenance/v1 \
+            "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+            "$ATTEST_REF" "$ATTEST_SHA" "$ATTEST_RUN_ID" "$ATTEST_RUN_ATTEMPT"
+          ./scripts/verify-attestation-anonymously.sh \
+            "$RUNNER_TEMP/draft-assets/echo-provider.wasm" \
+            "$GITHUB_REPOSITORY" "$EXPECTED_SHA" \
+            https://cyclonedx.org/bom \
+            "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+            "$ATTEST_REF" "$ATTEST_SHA" "$ATTEST_RUN_ID" "$ATTEST_RUN_ATTEMPT"
+
+          mkdir "$RUNNER_TEMP/source"
+          git archive "$SOURCE_SHA" | tar -x -C "$RUNNER_TEMP/source"
+          RUSTUP_TOOLCHAIN="$PROVIDER_RUST_TOOLCHAIN" \
+            "$RUNNER_TEMP/source/scripts/generate-sbom.py" "$RUNNER_TEMP/source-sbom.json"
+          test "$(sha256sum "$RUNNER_TEMP/source-sbom.json" | awk '{print $1}')" = \
+            "$EXPECTED_SBOM_SHA"
+          curl --fail --silent --show-error --location --get \
+            --data-urlencode 'predicate_type=https://cyclonedx.org/bom' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/attestations/sha256:$EXPECTED_SHA" \
+            >"$RUNNER_TEMP/sbom-attestations.json"
+          jq -e '.attestations | length == 1' "$RUNNER_TEMP/sbom-attestations.json" >/dev/null
+          jq -r '.attestations[0].bundle.dsseEnvelope.payload' \
+            "$RUNNER_TEMP/sbom-attestations.json" | base64 --decode \
+            >"$RUNNER_TEMP/sbom-statement.json"
+          jq -S '.predicate' "$RUNNER_TEMP/sbom-statement.json" \
+            >"$RUNNER_TEMP/attested-sbom.json"
+          jq -S '.' "$RUNNER_TEMP/source-sbom.json" >"$RUNNER_TEMP/source-sbom-sorted.json"
+          cmp "$RUNNER_TEMP/source-sbom-sorted.json" "$RUNNER_TEMP/attested-sbom.json"
+
+          anonymous=(env -u GH_TOKEN -u GITHUB_TOKEN "$RUNNER_TEMP/oras")
+          ref="$OCI_REPOSITORY:0.1.0"
+          test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
+            "$PRIOR_MANIFEST_DIGEST"
+          "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/manifest.json"
+          ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/manifest.json" \
+            "$RUNNER_TEMP/draft-assets/echo-provider.wasm" \
+            "$ATTEST_RUN_ID:$ATTEST_RUN_ATTEMPT" "$SOURCE_SHA"
+          test "$("${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort)" = \
+            "0.1.0"
+          for forbidden in latest staging; do
+            if "${anonymous[@]}" manifest fetch --descriptor \
+              "$OCI_REPOSITORY:$forbidden" >/dev/null 2>&1; then
+              echo "error: forbidden OCI tag exists: $forbidden" >&2
+              exit 1
+            fi
+          done
+          mkdir "$RUNNER_TEMP/oci"
+          "${anonymous[@]}" pull "$OCI_REPOSITORY@$PRIOR_MANIFEST_DIGEST" \
+            --output "$RUNNER_TEMP/oci"
+          test "$(find "$RUNNER_TEMP/oci" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
+          cmp "$RUNNER_TEMP/draft-assets/echo-provider.wasm" \
+            "$RUNNER_TEMP/oci/echo-provider.wasm"
+
+      - name: Revalidate every pointer, finalize captured draft, and verify anonymously
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          anonymous=(env -u GH_TOKEN -u GITHUB_TOKEN "$RUNNER_TEMP/oras")
+          ref="$OCI_REPOSITORY:0.1.0"
+
+          "$GITHUB_WORKSPACE/scripts/embed-license-bundle.py" write \
+            "$RUNNER_TEMP/license-bundle.txt" "$GITHUB_WORKSPACE"
+          cat >"$RUNNER_TEMP/release-notes.md" <<EOF
+          $PRIOR_MARKER
+
+          This release uses the exact immutable component artifact from successful tag CI run
+          \`32816234695\`. Attestations and the one-layer OCI residual were produced by pinned
+          recovery run \`$ATTEST_RUN_ID\`; this finalizer reverified all bytes before publication.
+
+          Import-free structured echo and Unicode message transformations. OCI manifest:
+          \`$OCI_REPOSITORY@$PRIOR_MANIFEST_DIGEST\` (tag \`0.1.0\`). The anonymous OCI layer is
+          byte-identical to \`echo-provider.wasm\`; verify it with the attached SHA-256 file.
+
+          Semantics: \`echo.echo\` returns the supplied semantic JSON value unchanged. The four
+          message transformations require exactly one string field, use Rust Unicode scalar/case
+          behavior, and have stable provider errors. This component has no imports or command words.
+          Duplicate JSON object names use serde_json's last-value-wins behavior. Production hosts
+          must enforce the documented 1 MiB input/output, 64 MiB memory, 50M fuel, and 30s limits.
+          No latest or temporary tag is published. The distribution license is **MIT OR Apache-2.0**.
+          EOF
+          {
+            printf '\n## Complete distribution license bundle\n\n'
+            cat "$RUNNER_TEMP/license-bundle.txt"
+          } >>"$RUNNER_TEMP/release-notes.md"
+          "$GITHUB_WORKSPACE/scripts/embed-license-bundle.py" verify-text \
+            "$RUNNER_TEMP/release-notes.md" "$GITHUB_WORKSPACE"
+          jq -n --rawfile body "$RUNNER_TEMP/release-notes.md" '{
+            draft: false,
+            prerelease: false,
+            make_latest: "false",
+            name: "v0.1.0",
+            body: $body
+          }' >"$RUNNER_TEMP/publish.json"
+
+          git fetch --force --no-tags origin main:refs/remotes/origin/main
+          git fetch --force origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+          test "$(git rev-parse "refs/tags/$SOURCE_TAG")" = "$SOURCE_TAG_OBJECT"
+          test "$(git rev-parse "refs/tags/$SOURCE_TAG^{}")" = "$SOURCE_SHA"
+          current=$(gh api "repos/$GITHUB_REPOSITORY/releases/$PRIOR_RELEASE_ID")
+          jq -e --arg marker "$PRIOR_MARKER" \
+            --argjson wasm "$PRIOR_WASM_ASSET_ID" \
+            --argjson checksum "$PRIOR_CHECKSUM_ASSET_ID" '
+              .draft == true and .tag_name == "v0.1.0" and
+              ((.body // "") | startswith($marker)) and
+              ([.assets[] | .id] | sort) == ([$wasm, $checksum] | sort)
+            ' <<<"$current" >/dev/null
+          test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
+            "$PRIOR_MANIFEST_DIGEST"
+          test "$("${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort)" = \
+            "0.1.0"
+          package=$(gh api "$PACKAGE_ENDPOINT")
+          test "$(jq -r .visibility <<<"$package")" = public
+          gh api --paginate "$PACKAGE_ENDPOINT/versions?per_page=100" |
+            jq -s 'add' >"$RUNNER_TEMP/final-versions.json"
+          jq -e --arg digest "$PRIOR_MANIFEST_DIGEST" '
+            length == 1 and .[0].name == $digest and
+            ((.[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+          ' "$RUNNER_TEMP/final-versions.json" >/dev/null
+
+          # This PATCH is the finalizer's sole mutation; everything above is read-only.
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$PRIOR_RELEASE_ID" \
+            --input "$RUNNER_TEMP/publish.json" >"$RUNNER_TEMP/published.json"
+          jq -e --arg marker "$PRIOR_MARKER" '
+            .id == 376223263 and .draft == false and .prerelease == false and
+            .tag_name == "v0.1.0" and ((.body // "") | startswith($marker))
+          ' "$RUNNER_TEMP/published.json" >/dev/null
+
+          for _attempt in {1..12}; do
+            if curl --fail --silent --show-error --location \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" \
+              >"$RUNNER_TEMP/public-release.json"; then
+              break
+            fi
+            sleep 5
+          done
+          jq -e '
+            .id == 376223263 and .draft == false and .prerelease == false and
+            ([.assets[].name] | sort) == ["echo-provider.wasm", "echo-provider.wasm.sha256"]
+          ' "$RUNNER_TEMP/public-release.json" >/dev/null
+          mkdir "$RUNNER_TEMP/public-assets"
+          for name in echo-provider.wasm echo-provider.wasm.sha256; do
+            url=$(jq -er --arg name "$name" \
+              '.assets[] | select(.name == $name) | .browser_download_url' \
+              "$RUNNER_TEMP/public-release.json")
+            curl --fail --silent --show-error --location "$url" \
+              --output "$RUNNER_TEMP/public-assets/$name"
+            cmp "$RUNNER_TEMP/draft-assets/$name" "$RUNNER_TEMP/public-assets/$name"
+          done
+          ./scripts/verify-release-assets.sh "$RUNNER_TEMP/public-assets"
+          ./scripts/verify-attestation-anonymously.sh \
+            "$RUNNER_TEMP/public-assets/echo-provider.wasm" \
+            "$GITHUB_REPOSITORY" "$EXPECTED_SHA" \
+            https://slsa.dev/provenance/v1 \
+            "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+            "$ATTEST_REF" "$ATTEST_SHA" "$ATTEST_RUN_ID" "$ATTEST_RUN_ATTEMPT"
+          ./scripts/verify-attestation-anonymously.sh \
+            "$RUNNER_TEMP/public-assets/echo-provider.wasm" \
+            "$GITHUB_REPOSITORY" "$EXPECTED_SHA" \
+            https://cyclonedx.org/bom \
+            "$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml" \
+            "$ATTEST_REF" "$ATTEST_SHA" "$ATTEST_RUN_ID" "$ATTEST_RUN_ATTEMPT"
+          test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
+            "$PRIOR_MANIFEST_DIGEST"
+          test "$("${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort)" = \
+            "0.1.0"

@@ -6,16 +6,17 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 ci="$root/.github/workflows/ci.yml"
 release="$root/.github/workflows/release.yml"
 recovery="$root/.github/workflows/recover-v0.1.0.yml"
+finalizer="$root/.github/workflows/finalize-v0.1.0.yml"
 recovery_helper="$root/scripts/recover-v0.1.0-artifacts.sh"
 verifier="$root/scripts/verify-oci-manifest.py"
 attestation_verifier="$root/scripts/verify-attestation-anonymously.sh"
-[[ -f "$ci" && -f "$release" && -f "$recovery" && -f "$recovery_helper" && \
-   -f "$verifier" && -f "$attestation_verifier" ]] || {
+[[ -f "$ci" && -f "$release" && -f "$recovery" && -f "$finalizer" && \
+   -f "$recovery_helper" && -f "$verifier" && -f "$attestation_verifier" ]] || {
   echo "error: CI, release/recovery workflows, recovery helper, and verifiers are required" >&2
   exit 1
 }
 
-python3 - "$ci" "$release" "$recovery" <<'PY'
+python3 - "$ci" "$release" "$recovery" "$finalizer" <<'PY'
 import pathlib
 import re
 import sys
@@ -67,7 +68,7 @@ if grep -Eq 'ghcr[.]io/dekopon-agents/provider-echo:(latest|staging|tmp|temp)' "
   exit 1
 fi
 if grep -Eq 'CARGO_TARGET_DIR|SCCACHE_DIR|cargo clean|pull_request_target' \
-  "$ci" "$release" "$recovery"; then
+  "$ci" "$release" "$recovery" "$finalizer"; then
   echo "error: workflow violates target/cache/event policy" >&2
   exit 1
 fi
@@ -94,7 +95,8 @@ for required in \
   'org.opencontainers.image.revision=$SOURCE_SHA' \
   'cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools' \
   'Attest both exact recovered release files' \
-  'Attest exact tag-source CycloneDX SBOM predicate for the component'; do
+  'Attest exact tag-source CycloneDX SBOM predicate for the component' \
+  '/orgs/dekopon-agents/packages/container/provider-echo'; do
   grep -Fq "$required" "$recovery" || {
     echo "error: recovery workflow omits pinned interlock: $required" >&2
     exit 1
@@ -114,12 +116,29 @@ if grep -Eq 'cargo (build|test|check)|build-component[.]sh|reproducible-build[.]
   echo "error: recovery workflow must not rebuild the component" >&2
   exit 1
 fi
+for required in \
+  'workflow_dispatch:' \
+  'finalize-v0.1.0-residual-from-run-32822577381' \
+  'ATTEST_RUN_ID: "32822577381"' \
+  'PRIOR_RELEASE_ID: "376223263"' \
+  'PRIOR_WASM_ASSET_ID: "528836226"' \
+  'PRIOR_MANIFEST_DIGEST: sha256:a59cd8871e39213a5333bc1141dda7a8941cae1771e4aab04c7a9612267d3833'; do
+  if ! grep -Fq "$required" "$finalizer"; then
+    echo "error: finalizer omits pinned residual interlock: $required" >&2
+    exit 1
+  fi
+done
+if grep -Eq 'packages: write|id-token: write|attestations: write' "$finalizer"; then
+  echo "error: finalizer must not mutate package state or create replacement attestations" >&2
+  exit 1
+fi
 
-python3 - "$release" "$recovery" <<'PY'
+python3 - "$release" "$recovery" "$finalizer" <<'PY'
 import pathlib
 import sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 recovery = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+finalizer = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 ghcr = text.index("  ghcr:")
 finalize = text.index("  finalize:", ghcr)
 anonymous = text.index("Recheck draft assets and every anonymous OCI byte, then finalize")
@@ -149,6 +168,12 @@ if recovery.count("gh release create v0.1.0") != 1:
     raise SystemExit("error: recovery draft creation cardinality drifted")
 if recovery.count("# This PATCH is the release transaction") != 1:
     raise SystemExit("error: recovery final transaction cardinality drifted")
+if finalizer.count("# This PATCH is the finalizer's sole mutation") != 1:
+    raise SystemExit("error: residual finalizer PATCH cardinality drifted")
+if finalizer.count('gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$PRIOR_RELEASE_ID"') != 1:
+    raise SystemExit("error: residual release finalization cardinality drifted")
+if "oras-bin\" push" in finalizer or "gh release create" in finalizer:
+    raise SystemExit("error: residual finalizer must not create replacement OCI/release state")
 PY
 
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/echo-workflow-verifiers.XXXXXX")
