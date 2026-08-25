@@ -92,6 +92,7 @@ for required in \
   './scripts/recover-v0.1.0-artifacts.sh "$RUNNER_TEMP/tagged"' \
   '$GITHUB_REPOSITORY/.github/workflows/recover-v0.1.0.yml' \
   'org.opencontainers.image.revision=$SOURCE_SHA' \
+  'cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools' \
   'Attest both exact recovered release files' \
   'Attest exact tag-source CycloneDX SBOM predicate for the component'; do
   grep -Fq "$required" "$recovery" || {

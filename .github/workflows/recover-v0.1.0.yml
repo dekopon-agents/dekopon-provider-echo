@@ -119,6 +119,8 @@ jobs:
           mkdir "$RUNNER_TEMP/source"
           git archive "$SOURCE_SHA" | tar -x -C "$RUNNER_TEMP/source"
           rustup toolchain install "$PROVIDER_RUST_TOOLCHAIN" --profile minimal
+          cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools \
+            --version "$WASM_TOOLS_VERSION" --locked
           RUSTUP_TOOLCHAIN="$PROVIDER_RUST_TOOLCHAIN" \
             "$RUNNER_TEMP/source/scripts/generate-sbom.py" \
               "$RUNNER_TEMP/echo-provider.cdx.json"
