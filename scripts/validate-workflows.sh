@@ -44,6 +44,9 @@ for required in \
   'subject-path: dist/echo-provider.wasm' \
   'needs.verify_final.result != '\''success'\''' \
   'manifest is missing, shared, or has another tag/version' \
+  'final-tags.json' \
+  'final-versions.jsons' \
+  'final-owned-draft.json' \
   'This PATCH is the release transaction' \
   'make_latest: "false"' \
   'permissions: {}' \
@@ -64,6 +67,14 @@ if grep -Eq 'CARGO_TARGET_DIR|SCCACHE_DIR|cargo clean|pull_request_target' "$ci"
   echo "error: workflow violates target/cache/event policy" >&2
   exit 1
 fi
+if sed -n '/^  draft:/,/^  ghcr:/p' "$release" | grep -Fq 'id-token: write'; then
+  echo "error: draft job has unnecessary OIDC authority" >&2
+  exit 1
+fi
+if ! sed -n '/^  finalize:/,/^  verify_final:/p' "$release" | grep -Fq 'packages: read'; then
+  echo "error: finalize job cannot revalidate package cardinality" >&2
+  exit 1
+fi
 
 python3 - "$release" <<'PY'
 import pathlib
@@ -72,11 +83,14 @@ text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 ghcr = text.index("  ghcr:")
 finalize = text.index("  finalize:", ghcr)
 anonymous = text.index("Recheck draft assets and every anonymous OCI byte, then finalize")
-patch = text.index("# This PATCH is the release transaction")
+final_tags = text.index("final-tags.json", anonymous)
+final_versions = text.index("final-versions.jsons", final_tags)
+final_draft = text.index("final-owned-draft.json", final_versions)
+patch = text.index("# This PATCH is the release transaction", final_draft)
 verify_final = text.index("  verify_final:", patch)
 cleanup = text.index("  cleanup_failed_release:", verify_final)
-if not ghcr < finalize <= anonymous < patch < verify_final < cleanup:
-    raise SystemExit("error: GHCR/finalization/anonymous-verification/cleanup ordering drifted")
+if not ghcr < finalize <= anonymous < final_tags < final_versions < final_draft < patch < verify_final < cleanup:
+    raise SystemExit("error: GHCR/finalization/cardinality/anonymous-verification/cleanup ordering drifted")
 if text.count("gh release create v0.1.0") != 1:
     raise SystemExit("error: draft creation cardinality drifted")
 if text.count('"$RUNNER_TEMP/oras-bin" push "$ref"') != 1:

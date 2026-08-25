@@ -159,7 +159,6 @@ jobs:
     permissions:
       contents: write
       attestations: read
-      id-token: write
       packages: read
     outputs:
       release_id: ${{ steps.create.outputs.release_id }}
@@ -411,6 +410,7 @@ jobs:
     permissions:
       contents: write
       attestations: read
+      packages: read
     env:
       GH_REPO: ${{ github.repository }}
     steps:
@@ -530,6 +530,32 @@ jobs:
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
           test "$(git rev-parse "$GITHUB_REF_NAME^{}")" = "$GITHUB_SHA"
           test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+
+          # Revalidate the complete public OCI and owned-draft cardinality immediately before the
+          # final mutation. A concurrent extra tag, version, or run-owned draft must stop release.
+          "${anonymous[@]}" repo tags "$OCI_REPOSITORY" --output json \
+            >"$RUNNER_TEMP/final-tags.json"
+          jq -e '(.tags | sort) == ["0.1.0"]' "$RUNNER_TEMP/final-tags.json" >/dev/null
+          test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
+            "$MANIFEST_DIGEST"
+          gh api --paginate \
+            /orgs/dekopon-agents/packages/container/provider-echo/versions?per_page=100 \
+            >"$RUNNER_TEMP/final-versions.jsons"
+          jq -se --arg digest "$MANIFEST_DIGEST" '
+            [.[][]] as $versions |
+            ($versions | length) == 1 and
+            $versions[0].name == $digest and
+            (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+          ' "$RUNNER_TEMP/final-versions.jsons" >/dev/null
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -s --arg marker "$MARKER" --arg release_id "$RELEASE_ID" '
+              [.[][] | select(
+                .draft == true and .tag_name == "v0.1.0" and
+                ((.body // "") | startswith($marker))
+              )] |
+              length == 1 and (.[0].id | tostring) == $release_id
+            ' >"$RUNNER_TEMP/final-owned-draft.json"
+          jq -e '. == true' "$RUNNER_TEMP/final-owned-draft.json" >/dev/null
 
           # This PATCH is the release transaction's final mutation. Everything above is read-only.
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \

@@ -87,7 +87,8 @@ def main() -> None:
 
     output = pathlib.Path(sys.argv[1])
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    with output.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
     print(f"generated deterministic CycloneDX SBOM with {len(components)} components: {output}")
 
 
