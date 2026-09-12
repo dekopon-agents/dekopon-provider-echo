@@ -256,7 +256,7 @@ manifest = {
 pathlib.Path(sys.argv[1]).write_text(json.dumps(manifest), encoding="utf-8")
 PY
 "$verifier" "$temporary/manifest.json" "$temporary/echo-provider.wasm" \
-  1:1 "$(printf 'a%.0s' {1..40})"
+  1:1 "$(printf 'a%.0s' {1..40})" 0.1.0
 python3 - "$temporary/manifest.json" <<'PY'
 import json
 import pathlib
@@ -267,7 +267,7 @@ manifest["layers"][0]["annotations"]["org.opencontainers.image.title"] = "dist/e
 path.write_text(json.dumps(manifest), encoding="utf-8")
 PY
 if "$verifier" "$temporary/manifest.json" "$temporary/echo-provider.wasm" \
-  1:1 "$(printf 'a%.0s' {1..40})" >/dev/null 2>&1; then
+  1:1 "$(printf 'a%.0s' {1..40})" 0.1.0 >/dev/null 2>&1; then
   echo 'error: OCI verifier accepted a path-bearing layer title' >&2
   exit 1
 fi

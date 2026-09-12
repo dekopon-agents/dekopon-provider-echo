@@ -19,7 +19,8 @@
 - Generalize the release workflow from the one-shot v0.1.0 transaction to any `v*` tag: the version
   comes from `cargo metadata`, the GHCR and release cardinality checks are scoped to the version
   being published rather than to the whole package, and `scripts/crate-version.sh` is the single
-  place the version is read from.
+  place the version is read from. `scripts/verify-oci-manifest.py` takes the version it is checking
+  as an argument instead of hardcoding it.
 
 ## 0.1.0 - Unreleased
 

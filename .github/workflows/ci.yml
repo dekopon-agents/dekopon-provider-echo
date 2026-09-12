@@ -62,7 +62,7 @@ jobs:
         run: ./scripts/validate-source.sh
 
   component:
-    name: component, direct host, testkit, and resources
+    name: component, raw host, testkit, and resources
     needs: source
     runs-on: ubuntu-24.04
     steps:
