@@ -4,8 +4,8 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 component=${1:-"$root/echo-provider.wasm"}
 [[ -f "$component" ]] || { echo "error: missing $component" >&2; exit 1; }
-[[ "$(wasmtime --version)" == "wasmtime 48.0.0" ]] || {
-  echo "error: wasmtime 48.0.0 is required" >&2
+[[ "$(wasmtime --version)" == "wasmtime 48.0.2" ]] || {
+  echo "error: wasmtime 48.0.2 is required" >&2
   exit 1
 }
 
@@ -22,7 +22,7 @@ jq -e '
   [.capabilities[].id] == ["echo.echo","echo.reverse","echo.upcase","echo.downcase","echo.ransom-case"] and
   ([.capabilities[].effect] | all(. == "read-only")) and
   ([.capabilities[].risk] | all(. == "Low")) and
-  ([.capabilities[].idempotency] | all(. == "idempotent"))
+  ([.capabilities[] | has("idempotency")] | all(. == false))
 ' <<<"$description" >/dev/null
 
 raw_invoke echo.echo '{"nested":[null,true,"🦀"]}' | jq -e '

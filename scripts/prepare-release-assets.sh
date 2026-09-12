@@ -2,9 +2,12 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-version=${1:-0.1.0}
+version=${1:-$("$root/scripts/crate-version.sh")}
 destination=${2:-"$root/dist"}
-[[ "$version" == 0.1.0 ]] || { echo "error: only immutable v0.1.0 is supported" >&2; exit 1; }
+[[ "$version" == "$("$root/scripts/crate-version.sh")" ]] || {
+  echo "error: $version is not this checkout's crate version" >&2
+  exit 1
+}
 case "$destination" in
   "$root/dist"|"$root"/dist/*) ;;
   *) echo "error: release destination must be inside $root/dist" >&2; exit 1 ;;

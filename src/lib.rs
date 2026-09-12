@@ -1,8 +1,8 @@
 //! Import-free Dekopon provider for structured echo and Unicode transformations.
 
 use dekopon_provider_sdk::{
-    CapabilityId, EffectKind, Idempotency, Provider, ProviderApiVersion, ProviderCapability,
-    ProviderError, ProviderManifest, RiskLevel, export_provider,
+    CapabilityId, EffectKind, Provider, ProviderApiVersion, ProviderCapability, ProviderError,
+    ProviderManifest, RiskLevel, export_provider,
 };
 use serde_json::{Value, json};
 
@@ -21,7 +21,6 @@ impl Provider for EchoProvider {
                     description: "Returns the supplied JSON object unchanged".to_owned(),
                     effect: EffectKind::ReadOnly,
                     risk: RiskLevel::Low,
-                    idempotency: Idempotency::Idempotent,
                     input_schema: json!({
                         "type": "object",
                         "additionalProperties": true
@@ -62,7 +61,6 @@ fn message_capability(id: &str, description: &str) -> ProviderCapability {
         description: description.to_owned(),
         effect: EffectKind::ReadOnly,
         risk: RiskLevel::Low,
-        idempotency: Idempotency::Idempotent,
         input_schema: json!({
             "type": "object",
             "properties": {"message": {"type": "string"}},
@@ -156,7 +154,6 @@ mod tests {
         for item in &manifest.capabilities {
             assert_eq!(item.effect, EffectKind::ReadOnly);
             assert_eq!(item.risk, RiskLevel::Low);
-            assert_eq!(item.idempotency, Idempotency::Idempotent);
         }
         assert_eq!(
             manifest.capabilities[0].input_schema,

@@ -19,8 +19,8 @@ assert_exact() {
     exit 1
   }
 }
-assert_exact dekopon-provider-sdk 0.11.1
-assert_exact dekopon-provider-sdk-testkit 0.11.1
+assert_exact dekopon-provider-sdk 0.13.0
+assert_exact dekopon-provider-sdk-testkit 0.13.0
 assert_exact serde_json 1.0.151
 assert_exact tokio 1.49.0
 
@@ -28,7 +28,7 @@ cargo tree --locked --manifest-path "$root/Cargo.toml" \
   --target wasm32-unknown-unknown --edges normal,build --prefix none --format '{p}' |
   LC_ALL=C sort -u >"$tree"
 for required in \
-  'dekopon-provider-sdk v0.11.1' \
+  'dekopon-provider-sdk v0.13.0' \
   'serde_json v1.0.151'; do
   grep -Fxq "$required" "$tree" || {
     echo "error: component graph omits $required" >&2

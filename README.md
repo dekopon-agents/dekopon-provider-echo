@@ -1,7 +1,6 @@
 # Dekopon echo provider
 
-A standalone, import-free WebAssembly component with five Low-risk, read-only, idempotent
-capabilities:
+A standalone, import-free WebAssembly component with five Low-risk, read-only capabilities:
 
 | Capability | Result |
 |---|---|
@@ -22,21 +21,18 @@ The broker—not this component—owns authentication, authorization, and host r
 
 ## Run it
 
-Install `dekopon-run 0.11.1`. After v0.1.0 is published, obtain `echo-provider.wasm` and
-`echo-provider.wasm.sha256` from the immutable release. The byte-identical Wasm will be the sole
-layer at `ghcr.io/dekopon-agents/provider-echo:0.1.0`; no `latest` tag is published.
+Obtain `echo-provider.wasm` and `echo-provider.wasm.sha256` from the release for the version you
+want. The byte-identical Wasm is the sole layer at `ghcr.io/dekopon-agents/provider-echo:<version>`;
+no `latest` tag is published.
 
 ```console
 sha256sum --check echo-provider.wasm.sha256
-dekopon-run invoke \
-  --provider ./echo-provider.wasm \
-  --max-memory-bytes 67108864 \
-  --max-input-bytes 1048576 \
-  --max-output-bytes 1048576 \
-  --fuel 50000000 \
-  --timeout-ms 30000 \
-  echo.upcase --input '{"message":"Hello, Straße!"}'
+oras pull ghcr.io/dekopon-agents/provider-echo:0.2.0
 ```
+
+Point a Dekopon broker at the component to serve it. To drive it directly — the same Wasmtime host
+and the same ceilings a deployment runs, with policy replaced by an allow-all gate — use
+`dekopon-provider-sdk-testkit`'s `FakeBroker`, as [`tests/broker.rs`](tests/broker.rs) does.
 
 Host limits in the release tests are 1 MiB serialized input/output, 64 MiB linear memory,
 50,000,000 fuel, and 30 seconds. `echo.echo` intentionally has no separate decoded-data limit;
@@ -48,17 +44,17 @@ Generated Wasm, checksums, `dist/`, and `target/` are ignored and must never be 
 use the checkout's ordinary `target/` and global Cargo/sccache configuration.
 
 ```console
-rustup toolchain install 1.89.0 --profile minimal
-rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
-rustup target add wasm32-unknown-unknown --toolchain 1.97.0
-cargo +1.97.0 install wasm-tools --version 1.236.1 --locked
+rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+rustup target add wasm32-unknown-unknown --toolchain 1.98.1
+cargo +1.98.1 install wasm-tools --version 1.259.0 --locked
+cargo +1.98.1 install wasmtime-cli --version 48.0.2 --locked
 ./scripts/validate.sh
 ./scripts/reproducible-build.sh
 ```
 
 `validate.sh` covers formatting, warnings-denied clippy, native tests, MSRV and Wasm checks,
-registry/license/advisory policy, exact copied WIT, zero imports, raw component ABI, direct
-`dekopon-run`, FakeBroker concurrency, resource ceilings, and exact two-file release layout.
+registry/license/advisory policy, exact copied WIT, zero imports, raw component ABI, FakeBroker
+concurrency, resource ceilings, and exact two-file release layout.
 See [`PROVENANCE.md`](PROVENANCE.md), [`SECURITY.md`](SECURITY.md), and
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 

@@ -409,7 +409,7 @@ jobs:
           "$RUNNER_TEMP/oras-bin" manifest fetch "$OCI_REPOSITORY@$digest" \
             >"$RUNNER_TEMP/authenticated-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/authenticated-manifest.json" \
-            dist/echo-provider.wasm "$run" "$SOURCE_SHA"
+            dist/echo-provider.wasm "$run" "$SOURCE_SHA" "$VERSION"
 
           for _ in {1..30}; do
             visibility=$(gh api /orgs/dekopon-agents/packages/container/provider-echo \
@@ -429,7 +429,7 @@ jobs:
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$digest"
           "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/anonymous-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/anonymous-manifest.json" \
-            dist/echo-provider.wasm "$run" "$SOURCE_SHA"
+            dist/echo-provider.wasm "$run" "$SOURCE_SHA" "$VERSION"
           mkdir "$RUNNER_TEMP/anonymous-pull"
           "${anonymous[@]}" pull "$ref" --output "$RUNNER_TEMP/anonymous-pull"
           test "$(find "$RUNNER_TEMP/anonymous-pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
@@ -532,7 +532,7 @@ jobs:
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$MANIFEST_DIGEST"
           "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/final-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/final-manifest.json" \
-            dist/echo-provider.wasm "$run" "$SOURCE_SHA"
+            dist/echo-provider.wasm "$run" "$SOURCE_SHA" "$VERSION"
           mkdir "$RUNNER_TEMP/final-pull"
           "${anonymous[@]}" pull "$ref" --output "$RUNNER_TEMP/final-pull"
           test "$(find "$RUNNER_TEMP/final-pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
@@ -673,7 +673,7 @@ jobs:
           "$RUNNER_TEMP/oras" manifest fetch "$ref" >"$RUNNER_TEMP/manifest.json"
           run=$(jq -er '.annotations["org.dekopon.release.run"]' "$RUNNER_TEMP/manifest.json")
           "$RUNNER_TEMP/verify-oci-manifest.py" "$RUNNER_TEMP/manifest.json" \
-            "$RUNNER_TEMP/release/echo-provider.wasm" "$run" "$SOURCE_SHA"
+            "$RUNNER_TEMP/release/echo-provider.wasm" "$run" "$SOURCE_SHA" "$VERSION"
           mkdir "$RUNNER_TEMP/pull"
           "$RUNNER_TEMP/oras" pull "$ref" --output "$RUNNER_TEMP/pull"
           test "$(find "$RUNNER_TEMP/pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1

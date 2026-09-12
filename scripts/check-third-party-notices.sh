@@ -18,11 +18,11 @@ require_locked() {
   grep -Fq "$version" "$notices" || { echo "error: notices omit version $version" >&2; exit 1; }
 }
 
-require_locked dekopon-provider-sdk 0.11.1
-require_locked dekopon-provider-sdk-testkit 0.11.1
+require_locked dekopon-provider-sdk 0.13.0
+require_locked dekopon-provider-sdk-testkit 0.13.0
 require_locked serde 1.0.229
 require_locked serde_json 1.0.151
-require_locked foldhash 0.1.5
+require_locked foldhash 0.2.0
 require_locked unicode-ident 1.0.24
 
 for phrase in \

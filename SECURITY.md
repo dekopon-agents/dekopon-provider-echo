@@ -4,7 +4,7 @@
 
 Report vulnerabilities privately through GitHub's security-advisory flow for
 `dekopon-agents/dekopon-provider-echo`. Do not include sensitive invocation content in public
-issues. Published v0.1.0 bytes are immutable; fixes require a new version.
+issues. Published release bytes are immutable; fixes require a new version.
 
 ## Authority and data boundary
 
@@ -34,9 +34,10 @@ crates, and wildcard direct dependencies. CI rejects tracked Wasm, decodes exact
 native/component/host/resource tests, verifies embedded notices, and compares two clean builds.
 Every third-party Action is full-commit-SHA pinned.
 
-The v0.1.0 release workflow accepts only an annotated `v0.1.0` at current `main`, rebuilds and
-attests Actions-owned bytes, creates one run-owned draft with exactly two assets, and publishes the
-same Wasm as one `application/wasm` layer at only
-`ghcr.io/dekopon-agents/provider-echo:0.1.0`. It anonymously verifies bytes and provenance before
-finalizing the captured release as the last mutation. Failure cleanup uses captured immutable
-release/package identities and refuses to delete anything it cannot prove belongs to the run.
+The release workflow accepts only an annotated `v<version>` at current `main` whose version equals
+the one `cargo metadata` reports, rebuilds and attests Actions-owned bytes, creates one run-owned
+draft with exactly two assets, and publishes the same Wasm as one `application/wasm` layer at only
+`ghcr.io/dekopon-agents/provider-echo:<version>`. A version already carrying that tag stops the
+release. It anonymously verifies bytes and provenance before finalizing the captured release as the
+last mutation. Failure cleanup uses captured immutable release/package identities and refuses to
+delete anything it cannot prove belongs to the run.

@@ -256,7 +256,7 @@ jobs:
           "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/manifest.json" \
             "$RUNNER_TEMP/draft-assets/echo-provider.wasm" \
-            "$ATTEST_RUN_ID:$ATTEST_RUN_ATTEMPT" "$SOURCE_SHA"
+            "$ATTEST_RUN_ID:$ATTEST_RUN_ATTEMPT" "$SOURCE_SHA" 0.1.0
           test "$("${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort)" = \
             "0.1.0"
           for forbidden in latest staging; do
