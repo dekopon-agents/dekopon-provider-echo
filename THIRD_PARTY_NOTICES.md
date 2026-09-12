@@ -11,19 +11,19 @@ complete byte-exact distribution license bundle without adding a third release a
 
 ## Dekopon component interface
 
-The component uses `dekopon-provider-sdk 0.11.1`, `dekopon-core 0.11.1`, and
-`dekopon-capability 0.11.1`, all licensed MIT OR Apache-2.0. Generated bindings use
-`wit-bindgen 0.44.0` and the WebAssembly/WIT `0.236.1` toolchain crates, licensed under
+The component uses `dekopon-provider-sdk 0.13.0`, `dekopon-core 0.13.0`, and
+`dekopon-capability 0.13.0`, all licensed MIT OR Apache-2.0. Generated bindings use
+`wit-bindgen 0.62.0` and the WebAssembly/WIT `0.259.0` toolchain crates, licensed under
 Apache-2.0 WITH LLVM-exception, Apache-2.0, and/or MIT. The checked component has zero imports.
 
-`dekopon-provider-sdk-testkit 0.11.1`, Tokio, Wasmtime, HTTP-host, and storage-host packages occur
+`dekopon-provider-sdk-testkit 0.13.0`, Tokio, Wasmtime, HTTP-host, and storage-host packages occur
 only in native development/test resolution. They are not linked into `echo-provider.wasm`; the
 component-target dependency-tree and decoded-WIT gates enforce that distinction.
 
 ## Serialization and supporting crates
 
 The component directly pins `serde_json 1.0.151`. Its component graph also includes
-`serde 1.0.229`, `foldhash 0.1.5`, `unicode-ident 1.0.24`, and other exact transitive packages.
+`serde 1.0.229`, `foldhash 0.2.0`, `unicode-ident 1.0.24`, and other exact transitive packages.
 These are permissively licensed under the allowlist in `deny.toml`, including MIT, Apache-2.0,
 Unicode-3.0, Unlicense, and Zlib. Complete project MIT and Apache-2.0 texts are adjacent source
 files and are embedded verbatim in every release component.

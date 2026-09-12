@@ -1,24 +1,23 @@
-name: Immutable v0.1.0 release
+name: Release
 
 on:
   push:
     tags:
-      - "v0.1.0"
+      - "v*"
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-v0.1.0
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
-  PROVIDER_MSRV: "1.89.0"
-  PROVIDER_RUST_TOOLCHAIN: "1.97.0"
-  WASM_TOOLS_VERSION: "1.236.1"
+  PROVIDER_MSRV: "1.98.1"
+  PROVIDER_RUST_TOOLCHAIN: "1.98.1"
+  WASM_TOOLS_VERSION: "1.259.0"
   CARGO_DENY_VERSION: "0.20.2"
-  DEKOPON_RUN_VERSION: "0.11.1"
-  WASMTIME_VERSION: "48.0.0"
+  WASMTIME_VERSION: "48.0.2"
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_LINUX_AMD64_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
   ORAS_VERSION: "1.2.3"
@@ -46,13 +45,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = dekopon-agents/dekopon-provider-echo
-          test "$GITHUB_REF_NAME" = v0.1.0
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
           test "$(git rev-parse "$GITHUB_REF_NAME^{}")" = "$GITHUB_SHA"
           version=$(cargo metadata --locked --no-deps --format-version 1 |
             jq -er '.packages[] | select(.name == "dekopon-echo-provider") | .version')
-          test "$version" = 0.1.0
           test "$GITHUB_REF_NAME" = "v$version"
           git fetch --force --no-tags origin main:refs/remotes/origin/main
           test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
@@ -70,8 +67,6 @@ jobs:
             --version "$CARGO_DENY_VERSION" --locked
           cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools \
             --version "$WASM_TOOLS_VERSION" --locked
-          cargo +"$PROVIDER_RUST_TOOLCHAIN" install dekopon-run \
-            --version "$DEKOPON_RUN_VERSION" --locked
           cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasmtime-cli \
             --version "$WASMTIME_VERSION" --locked
           sudo apt-get update
@@ -139,7 +134,7 @@ jobs:
           jq -e '
             .bomFormat == "CycloneDX" and .specVersion == "1.5" and
             .metadata.component.name == "dekopon-echo-provider" and
-            ([.components[] | select(.name == "dekopon-provider-sdk") | .version] == ["0.11.1"])
+            ([.components[] | select(.name == "dekopon-provider-sdk") | .version] == ["0.13.0"])
           ' sbom/echo-provider.cdx.json >/dev/null
       - name: Attest both immutable release files
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
@@ -165,6 +160,7 @@ jobs:
       marker: ${{ steps.create.outputs.marker }}
     env:
       GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
     steps:
       - name: Check out verification scripts without credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -199,24 +195,33 @@ jobs:
             --predicate-type https://cyclonedx.org/bom \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA"
-      - name: Prove the release and entire final GHCR package are absent
+      - name: Prove this release and this GHCR version tag are absent
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" \
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
             >"$RUNNER_TEMP/existing-release.json" 2>"$RUNNER_TEMP/release.err"; then
-            echo "error: immutable v0.1.0 release already exists" >&2
+            echo "error: release $GITHUB_REF_NAME already exists" >&2
             exit 1
           fi
           grep -Eqi 'not found|404' "$RUNNER_TEMP/release.err"
-          if gh api /orgs/dekopon-agents/packages/container/provider-echo \
-            >"$RUNNER_TEMP/existing-package.json" 2>"$RUNNER_TEMP/package.err"; then
-            echo "error: final provider-echo package already exists" >&2
-            exit 1
+          # Earlier published versions of this package are expected. This one's tag is not, and a
+          # version is immutable: an existing tag means the release already happened.
+          if gh api --paginate \
+            /orgs/dekopon-agents/packages/container/provider-echo/versions?per_page=100 \
+            >"$RUNNER_TEMP/existing-versions.jsons" 2>"$RUNNER_TEMP/package.err"; then
+            jq -se --arg version "$VERSION" '
+              [.[][] | select(((.metadata.container.tags // []) | index($version)) != null)] |
+              length == 0
+            ' "$RUNNER_TEMP/existing-versions.jsons" >/dev/null || {
+              echo "error: GHCR already carries provider-echo:$VERSION" >&2
+              exit 1
+            }
+          else
+            grep -Eqi 'not found|404' "$RUNNER_TEMP/package.err"
           fi
-          grep -Eqi 'not found|404' "$RUNNER_TEMP/package.err"
       - name: Create a run-marked draft with exactly two assets
         id: create
         env:
@@ -227,15 +232,15 @@ jobs:
           marker="provider-echo-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           printf '%s\n\nAwaiting verified OCI manifest before finalization.\n' "$marker" \
             >"$RUNNER_TEMP/draft-notes.md"
-          gh release create v0.1.0 --verify-tag --draft --title v0.1.0 \
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" \
             --notes-file "$RUNNER_TEMP/draft-notes.md" \
             dist/echo-provider.wasm dist/echo-provider.wasm.sha256
           release_id=
           for _attempt in {1..30}; do
             gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-              jq -s --arg marker "$marker" '
+              jq -s --arg marker "$marker" --arg tag "$GITHUB_REF_NAME" '
                 [.[][] | select(
-                  .draft == true and .tag_name == "v0.1.0" and
+                  .draft == true and .tag_name == $tag and
                   ((.body // "") | startswith($marker))
                 )]
               ' >"$RUNNER_TEMP/run-owned-drafts.json"
@@ -262,8 +267,8 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/draft.json"
-          jq -e --arg marker "$MARKER" '
-            .draft == true and .tag_name == "v0.1.0" and
+          jq -e --arg marker "$MARKER" --arg tag "$GITHUB_REF_NAME" '
+            .draft == true and .tag_name == $tag and
             ((.body // "") | startswith($marker)) and
             ([.assets[].name] | sort) ==
               ["echo-provider.wasm", "echo-provider.wasm.sha256"]
@@ -320,7 +325,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push only 0.1.0, verify manifest, make public, and pull anonymously
+      - name: Push only this version, verify manifest, make public, and pull anonymously
         id: publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -330,12 +335,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$VERSION" = 0.1.0
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           ref="$OCI_REPOSITORY:$VERSION"
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/owned-draft.json"
-          jq -e --arg marker "$MARKER" '
-            .draft == true and .tag_name == "v0.1.0" and
+          jq -e --arg marker "$MARKER" --arg tag "$GITHUB_REF_NAME" '
+            .draft == true and .tag_name == $tag and
             ((.body // "") | startswith($marker))
           ' "$RUNNER_TEMP/owned-draft.json" >/dev/null
           if "$RUNNER_TEMP/oras-bin" manifest fetch --descriptor "$ref" \
@@ -396,11 +401,12 @@ jobs:
           gh api --paginate \
             /orgs/dekopon-agents/packages/container/provider-echo/versions?per_page=100 \
             >"$RUNNER_TEMP/versions.jsons"
-          jq -se --arg digest "$digest" '
-            [.[][]] as $versions |
-            ($versions | length) == 1 and
-            $versions[0].name == $digest and
-            (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+          jq -se --arg digest "$digest" --arg version "$VERSION" '
+            [.[][] | select(((.metadata.container.tags // []) | index($version)) != null)]
+              as $tagged |
+            ($tagged | length) == 1 and
+            $tagged[0].name == $digest and
+            (($tagged[0].metadata.container.tags // []) | sort) == [$version]
           ' "$RUNNER_TEMP/versions.jsons" >/dev/null
 
   finalize:
@@ -447,15 +453,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$VERSION" = 0.1.0
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           ref="$OCI_REPOSITORY:$VERSION"
           ./scripts/verify-release-assets.sh "$PWD/dist"
 
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/final-draft.json"
-          jq -e --arg marker "$MARKER" '
-            .draft == true and .tag_name == "v0.1.0" and
+          jq -e --arg marker "$MARKER" --arg tag "$GITHUB_REF_NAME" '
+            .draft == true and .tag_name == $tag and
             ((.body // "") | startswith($marker)) and
             ([.assets[].name] | sort) ==
               ["echo-provider.wasm", "echo-provider.wasm.sha256"]
@@ -497,7 +503,7 @@ jobs:
           $MARKER
 
           Import-free structured echo and Unicode message transformations. OCI manifest:
-          \`$OCI_REPOSITORY@$MANIFEST_DIGEST\` (tag \`0.1.0\`). The anonymous OCI layer is byte-identical
+          \`$OCI_REPOSITORY@$MANIFEST_DIGEST\` (tag \`$VERSION\`). The anonymous OCI layer is byte-identical
           to \`echo-provider.wasm\`; verify it with the attached SHA-256 file.
 
           Semantics: \`echo.echo\` returns the supplied semantic JSON value unchanged. The four
@@ -516,11 +522,11 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/embed-license-bundle.py" verify-text \
             "$RUNNER_TEMP/release-notes.md" "$GITHUB_WORKSPACE"
           test "$(wc -c <"$RUNNER_TEMP/release-notes.md")" -le 125000
-          jq -n --rawfile body "$RUNNER_TEMP/release-notes.md" '{
+          jq -n --rawfile body "$RUNNER_TEMP/release-notes.md" --arg tag "$GITHUB_REF_NAME" '{
             draft: false,
             prerelease: false,
             make_latest: "false",
-            name: "v0.1.0",
+            name: $tag,
             body: $body
           }' >"$RUNNER_TEMP/publish.json"
 
@@ -535,22 +541,25 @@ jobs:
           # final mutation. A concurrent extra tag, version, or run-owned draft must stop release.
           "${anonymous[@]}" repo tags "$OCI_REPOSITORY" --output json \
             >"$RUNNER_TEMP/final-tags.json"
-          jq -e '(.tags | sort) == ["0.1.0"]' "$RUNNER_TEMP/final-tags.json" >/dev/null
+          jq -e --arg version "$VERSION" '(.tags | index($version)) != null' \
+            "$RUNNER_TEMP/final-tags.json" >/dev/null
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
             "$MANIFEST_DIGEST"
           gh api --paginate \
             /orgs/dekopon-agents/packages/container/provider-echo/versions?per_page=100 \
             >"$RUNNER_TEMP/final-versions.jsons"
-          jq -se --arg digest "$MANIFEST_DIGEST" '
-            [.[][]] as $versions |
-            ($versions | length) == 1 and
-            $versions[0].name == $digest and
-            (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+          jq -se --arg digest "$MANIFEST_DIGEST" --arg version "$VERSION" '
+            [.[][] | select(((.metadata.container.tags // []) | index($version)) != null)]
+              as $tagged |
+            ($tagged | length) == 1 and
+            $tagged[0].name == $digest and
+            (($tagged[0].metadata.container.tags // []) | sort) == [$version]
           ' "$RUNNER_TEMP/final-versions.jsons" >/dev/null
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-            jq -s --arg marker "$MARKER" --arg release_id "$RELEASE_ID" '
+            jq -s --arg marker "$MARKER" --arg release_id "$RELEASE_ID" \
+              --arg tag "$GITHUB_REF_NAME" '
               [.[][] | select(
-                .draft == true and .tag_name == "v0.1.0" and
+                .draft == true and .tag_name == $tag and
                 ((.body // "") | startswith($marker))
               )] |
               length == 1 and (.[0].id | tostring) == $release_id
@@ -560,8 +569,8 @@ jobs:
           # This PATCH is the release transaction's final mutation. Everything above is read-only.
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             --input "$RUNNER_TEMP/publish.json" >"$RUNNER_TEMP/published.json"
-          jq -e --arg marker "$MARKER" '
-            .draft == false and .tag_name == "v0.1.0" and
+          jq -e --arg marker "$MARKER" --arg tag "$GITHUB_REF_NAME" '
+            .draft == false and .tag_name == $tag and
             ((.body // "") | startswith($marker))
           ' "$RUNNER_TEMP/published.json" >/dev/null
 
@@ -578,7 +587,7 @@ jobs:
           MANIFEST_DIGEST: ${{ needs.ghcr.outputs.manifest_digest }}
         run: |
           set -euo pipefail
-          test "$VERSION" = 0.1.0
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test -z "${GH_TOKEN-}${GITHUB_TOKEN-}"
           repo="$GITHUB_REPOSITORY"
           source="https://raw.githubusercontent.com/$repo/$GITHUB_SHA"
@@ -588,7 +597,7 @@ jobs:
             chmod 0755 "$RUNNER_TEMP/$script"
           done
           curl --fail --silent --show-error --location \
-            "https://api.github.com/repos/$repo/releases/tags/v0.1.0" \
+            "https://api.github.com/repos/$repo/releases/tags/$GITHUB_REF_NAME" \
             --output "$RUNNER_TEMP/release.json"
           jq -e '
             .draft == false and .prerelease == false and
@@ -663,10 +672,15 @@ jobs:
           RELEASE_ID: ${{ needs.draft.outputs.release_id }}
           MARKER: ${{ needs.draft.outputs.marker }}
           EXPECTED_DIGEST: ${{ needs.ghcr.outputs.manifest_digest }}
+          VERSION: ${{ needs.build.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          # `build` may itself be what failed, leaving VERSION empty; the tag is then the only
+          # statement of the version, and every deletion below is still gated on this run's marker.
+          version=${VERSION:-${GITHUB_REF_NAME#v}}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           expected_marker="provider-echo-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           [[ -z "$MARKER" || "$MARKER" == "$expected_marker" ]]
           [[ -z "$EXPECTED_DIGEST" || "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -683,16 +697,16 @@ jobs:
             gh api "$endpoint" >"$RUNNER_TEMP/release.json" 2>"$RUNNER_TEMP/release.err" || true
           else
             gh api --paginate "$endpoint" | jq -s 'add' >"$RUNNER_TEMP/releases.json"
-            jq --arg marker "$expected_marker" '
+            jq --arg marker "$expected_marker" --arg tag "$GITHUB_REF_NAME" '
               [.[] | select(
-                .tag_name == "v0.1.0" and ((.body // "") | startswith($marker))
+                .tag_name == $tag and ((.body // "") | startswith($marker))
               )] |
               if length == 1 then .[0] elif length == 0 then null
               else error("multiple run-owned releases") end
             ' "$RUNNER_TEMP/releases.json" >"$RUNNER_TEMP/release.json"
           fi
-          if jq -e --arg marker "$expected_marker" '
-            . != null and .tag_name == "v0.1.0" and
+          if jq -e --arg marker "$expected_marker" --arg tag "$GITHUB_REF_NAME" '
+            . != null and .tag_name == $tag and
             ((.body // "") | startswith($marker))
           ' "$RUNNER_TEMP/release.json" >/dev/null 2>&1; then
             release_owned=true
@@ -700,7 +714,7 @@ jobs:
             jq -e '.draft == true or .draft == false' "$RUNNER_TEMP/release.json" >/dev/null
           fi
 
-          ref="$OCI_REPOSITORY:0.1.0"
+          ref="$OCI_REPOSITORY:$version"
           digest=
           if descriptor=$("$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" \
             2>"$RUNNER_TEMP/descriptor.err"); then
@@ -709,12 +723,12 @@ jobs:
             [[ -z "$EXPECTED_DIGEST" || "$digest" == "$EXPECTED_DIGEST" ]]
             "$RUNNER_TEMP/oras" manifest fetch "$OCI_REPOSITORY@$digest" \
               >"$RUNNER_TEMP/owned-manifest.json"
-            jq -e --arg run "$run" --arg revision "$GITHUB_SHA" '
+            jq -e --arg run "$run" --arg revision "$GITHUB_SHA" --arg version "$version" '
               .artifactType == "application/vnd.dekopon.provider.v1+wasm" and
               .annotations["org.dekopon.release.run"] == $run and
               .annotations["org.opencontainers.image.source"] ==
                 "https://github.com/dekopon-agents/dekopon-provider-echo" and
-              .annotations["org.opencontainers.image.version"] == "0.1.0" and
+              .annotations["org.opencontainers.image.version"] == $version and
               .annotations["org.opencontainers.image.revision"] == $revision and
               .annotations["org.opencontainers.image.licenses"] ==
                 "MIT OR Apache-2.0" and
@@ -726,12 +740,13 @@ jobs:
             gh api --paginate \
               /orgs/dekopon-agents/packages/container/provider-echo/versions?per_page=100 \
               >"$RUNNER_TEMP/cleanup-versions.jsons"
-            version_id=$(jq -ser --arg digest "$digest" '
-              [.[][]] as $versions |
-              if ($versions | length) == 1 and
-                 $versions[0].name == $digest and
-                 (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
-              then $versions[0].id
+            version_id=$(jq -ser --arg digest "$digest" --arg version "$version" '
+              [.[][] | select(((.metadata.container.tags // []) | index($version)) != null)]
+                as $tagged |
+              if ($tagged | length) == 1 and
+                 $tagged[0].name == $digest and
+                 (($tagged[0].metadata.container.tags // []) | sort) == [$version]
+              then $tagged[0].id
               else error("manifest is missing, shared, or has another tag/version") end
             ' "$RUNNER_TEMP/cleanup-versions.jsons")
             [[ "$version_id" =~ ^[0-9]+$ ]]

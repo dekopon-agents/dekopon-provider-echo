@@ -66,20 +66,20 @@ def main() -> None:
         "metadata": {
             "component": {
                 "type": "application",
-                "bom-ref": "pkg:cargo/dekopon-echo-provider@0.1.0",
+                "bom-ref": "pkg:cargo/dekopon-echo-provider@0.2.0",
                 "name": "dekopon-echo-provider",
-                "version": "0.1.0",
-                "purl": "pkg:cargo/dekopon-echo-provider@0.1.0",
+                "version": "0.2.0",
+                "purl": "pkg:cargo/dekopon-echo-provider@0.2.0",
             },
             "properties": [
                 {"name": "dekopon.target", "value": "wasm32-unknown-unknown"},
-                {"name": "dekopon.sdk", "value": "0.11.1"},
+                {"name": "dekopon.sdk", "value": "0.13.0"},
             ],
         },
         "components": components,
     }
     names = {(item["name"], item["version"]) for item in components}
-    if ("dekopon-provider-sdk", "0.11.1") not in names or ("serde_json", "1.0.151") not in names:
+    if ("dekopon-provider-sdk", "0.13.0") not in names or ("serde_json", "1.0.151") not in names:
         fail("SBOM omits exact direct shipped dependencies")
     for forbidden in ("dekopon-provider-sdk-testkit", "tokio", "dekopon-provider-http", "dekopon-provider-storage"):
         if any(item["name"] == forbidden for item in components):

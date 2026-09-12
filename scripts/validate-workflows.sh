@@ -29,8 +29,8 @@ for path_string in sys.argv[1:]:
 PY
 
 for required in \
-  'tags:' \
-  '"v0.1.0"' \
+  '    tags:' \
+  '      - "v*"' \
   'test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag' \
   'test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"' \
   'for _attempt in {1..30}; do' \
@@ -65,6 +65,11 @@ done
 
 if grep -Eq 'ghcr[.]io/dekopon-agents/provider-echo:(latest|staging|tmp|temp)' "$release"; then
   echo "error: release names a mutable or secondary package tag" >&2
+  exit 1
+fi
+if grep -Eq '(^|[^0-9.])v?0[.]1[.]0([^0-9.]|$)' "$release" "$ci"; then
+  echo "error: release or CI workflow pins a literal crate version" >&2
+  grep -En '(^|[^0-9.])v?0[.]1[.]0([^0-9.]|$)' "$release" "$ci" >&2
   exit 1
 fi
 if grep -Eq 'CARGO_TARGET_DIR|SCCACHE_DIR|cargo clean|pull_request_target' \
@@ -150,7 +155,7 @@ verify_final = text.index("  verify_final:", patch)
 cleanup = text.index("  cleanup_failed_release:", verify_final)
 if not ghcr < finalize <= anonymous < final_tags < final_versions < final_draft < patch < verify_final < cleanup:
     raise SystemExit("error: GHCR/finalization/cardinality/anonymous-verification/cleanup ordering drifted")
-if text.count("gh release create v0.1.0") != 1:
+if text.count('gh release create "$GITHUB_REF_NAME"') != 1:
     raise SystemExit("error: draft creation cardinality drifted")
 if text.count('"$RUNNER_TEMP/oras-bin" push "$ref"') != 1:
     raise SystemExit("error: OCI push cardinality drifted")
