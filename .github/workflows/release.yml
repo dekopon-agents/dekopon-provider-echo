@@ -539,10 +539,9 @@ jobs:
 
           # Revalidate the complete public OCI and owned-draft cardinality immediately before the
           # final mutation. A concurrent extra tag, version, or run-owned draft must stop release.
-          "${anonymous[@]}" repo tags "$OCI_REPOSITORY" --output json \
-            >"$RUNNER_TEMP/final-tags.json"
-          jq -e --arg version "$VERSION" '(.tags | index($version)) != null' \
-            "$RUNNER_TEMP/final-tags.json" >/dev/null
+          "${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort \
+            >"$RUNNER_TEMP/final-tags.txt"
+          grep -Fxq "$VERSION" "$RUNNER_TEMP/final-tags.txt"
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
             "$MANIFEST_DIGEST"
           gh api --paginate \
