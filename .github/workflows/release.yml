@@ -325,7 +325,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push only this version, verify manifest, make public, and pull anonymously
+      - name: Push only this version, verify the manifest, and pull anonymously
         id: publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -372,19 +372,8 @@ jobs:
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/authenticated-manifest.json" \
             dist/echo-provider.wasm "$run" "$GITHUB_SHA" "$VERSION"
 
-          for _ in {1..30}; do
-            visibility=$(gh api /orgs/dekopon-agents/packages/container/provider-echo \
-              --jq .visibility 2>/dev/null || true)
-            if [[ "$visibility" == public ]]; then break; fi
-            if [[ "$visibility" == private ]]; then
-              gh api --method PATCH \
-                /orgs/dekopon-agents/packages/container/provider-echo \
-                -f visibility=public >/dev/null
-            fi
-            sleep 2
-          done
-          test "$(gh api /orgs/dekopon-agents/packages/container/provider-echo --jq .visibility)" = public
-
+          # GHCR publishes a public repository's package publicly, and there is no API to change a
+          # container package's visibility. The anonymous, logged-out pull below is the proof.
           docker logout ghcr.io
           anonymous=(env -u GH_TOKEN -u GITHUB_TOKEN "$RUNNER_TEMP/oras-bin")
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$digest"
@@ -539,10 +528,9 @@ jobs:
 
           # Revalidate the complete public OCI and owned-draft cardinality immediately before the
           # final mutation. A concurrent extra tag, version, or run-owned draft must stop release.
-          "${anonymous[@]}" repo tags "$OCI_REPOSITORY" --output json \
-            >"$RUNNER_TEMP/final-tags.json"
-          jq -e --arg version "$VERSION" '(.tags | index($version)) != null' \
-            "$RUNNER_TEMP/final-tags.json" >/dev/null
+          "${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort \
+            >"$RUNNER_TEMP/final-tags.txt"
+          grep -Fxq "$VERSION" "$RUNNER_TEMP/final-tags.txt"
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
             "$MANIFEST_DIGEST"
           gh api --paginate \

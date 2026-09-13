@@ -48,7 +48,7 @@ for required in \
   'subject-path: dist/echo-provider.wasm' \
   'needs.verify_final.result != '\''success'\''' \
   'manifest is missing, shared, or has another tag/version' \
-  'final-tags.json' \
+  'final-tags.txt' \
   'final-versions.jsons' \
   'final-owned-draft.json' \
   'This PATCH is the release transaction' \
@@ -147,7 +147,7 @@ finalizer = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 ghcr = text.index("  ghcr:")
 finalize = text.index("  finalize:", ghcr)
 anonymous = text.index("Recheck draft assets and every anonymous OCI byte, then finalize")
-final_tags = text.index("final-tags.json", anonymous)
+final_tags = text.index("final-tags.txt", anonymous)
 final_versions = text.index("final-versions.jsons", final_tags)
 final_draft = text.index("final-owned-draft.json", final_versions)
 patch = text.index("# This PATCH is the release transaction", final_draft)
