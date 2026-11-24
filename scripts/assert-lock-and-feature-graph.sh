@@ -22,7 +22,7 @@ assert_exact() {
 assert_exact dekopon-provider-sdk 0.13.0
 assert_exact dekopon-provider-sdk-testkit 0.13.0
 assert_exact serde_json 1.0.151
-assert_exact tokio 1.49.0
+assert_exact tokio 1.54.1
 
 cargo tree --locked --manifest-path "$root/Cargo.toml" \
   --target wasm32-unknown-unknown --edges normal,build --prefix none --format '{p}' |
